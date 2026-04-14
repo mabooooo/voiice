@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 
+import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
@@ -18,8 +19,9 @@ const runtimeRoot = path.join(__dirname, '.runtime')
 const runtimeUserData = path.join(runtimeRoot, 'user-data')
 const runtimeSessionData = path.join(runtimeRoot, 'session-data')
 const runtimeLogs = path.join(runtimeRoot, 'logs')
+const runtimeScreenshots = path.join(runtimeRoot, 'desktop-captures')
 
-for (const target of [runtimeRoot, runtimeUserData, runtimeSessionData, runtimeLogs]) {
+for (const target of [runtimeRoot, runtimeUserData, runtimeSessionData, runtimeLogs, runtimeScreenshots]) {
   fs.mkdirSync(target, { recursive: true })
 }
 
@@ -261,6 +263,15 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:save-recording', async (_event, payload) => {
     return saveRecordingToTemp(payload)
+  })
+
+  ipcMain.handle('bridge:capture-desktop-screenshot', async (_event, payload = {}) => {
+    // 桌面分析统一落盘到项目本地目录，便于后续人工检查与离线处理。
+    return captureDesktopScreenshots({
+      outputDir: runtimeScreenshots,
+      compressed: Boolean(payload.compressed),
+      maxHeight: payload.maxHeight ?? 720,
+    })
   })
 
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {

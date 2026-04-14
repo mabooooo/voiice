@@ -10,6 +10,7 @@
 - 调用阿里云百炼北京节点 `qwen3-omni-flash` 做音频转写
 - 在本地把转写文本匹配成白名单动作
 - 执行 Windows 桌面动作
+- 在开发者模式里执行多屏桌面截图，并可额外生成 `640P` 压缩截图落盘
 
 ## 安全边界
 
@@ -64,5 +65,6 @@ npm run start
 - 非流式模式更适合短语音指令场景
 - `cmd+w` 在 Windows 里会映射为 `Ctrl+W`
 - 当前桌面控制通过 Electron 主进程调用 PowerShell 完成
+- 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
 - 当前界面为 React + Vite 构建产物，Electron 启动前会先构建 renderer
 - 后续可以把 `src/windowsController.mjs` 替换为 Go / Rust 守护进程 RPC

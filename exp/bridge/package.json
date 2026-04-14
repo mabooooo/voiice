@@ -9,7 +9,8 @@
     "build:renderer": "vite build --base=./",
     "start": "chcp 65001>nul && npm run build:renderer && electron .",
     "dev": "chcp 65001>nul && npm run build:renderer && electron .",
-    "smoke:matcher": "node ./scripts/smoke-matcher.mjs"
+    "smoke:matcher": "node ./scripts/smoke-matcher.mjs",
+    "smoke:screenshot": "electron ./scripts/smoke-screenshot.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

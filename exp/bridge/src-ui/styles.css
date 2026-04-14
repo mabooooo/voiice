@@ -971,10 +971,18 @@ textarea {
   gap: 16px;
 }
 
+.dialog-grid__full {
+  grid-column: 1 / -1;
+}
+
 .move-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.window-automation-view {
+  max-height: 360px;
 }
 
 @media (max-width: 800px) {

@@ -1,4 +1,5 @@
 import { runPowerShell } from './powershell.mjs'
+import { getWindowAutomationTree } from './windowAutomation.mjs'
 
 function buildWindowApiScript() {
   return `
@@ -299,5 +300,23 @@ export class WindowRegistry {
     const parsed = await parseJsonOutput(result)
     await this.refreshSnapshot()
     return parsed
+  }
+
+  async getWindowAutomation(handle, options = {}) {
+    const snapshot = await this.listWindows()
+    const target = snapshot.items.find(
+      (item) => item.handle === String(handle) || item.shortId === String(handle),
+    )
+
+    if (!target) {
+      throw new Error(`Window not found: ${handle}`)
+    }
+
+    const automation = await getWindowAutomationTree(target.handle, options)
+    return {
+      item: target,
+      updatedAt: snapshot.updatedAt,
+      automation,
+    }
   }
 }

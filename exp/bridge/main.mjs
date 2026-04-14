@@ -449,6 +449,10 @@ app.whenReady().then(async () => {
     return windowRegistry.getWindowDetail(handle)
   })
 
+  ipcMain.handle('bridge:get-window-automation', async (_event, payload = {}) => {
+    return windowRegistry.getWindowAutomation(payload.handle, payload.options)
+  })
+
   ipcMain.handle('bridge:window-action', async (_event, payload) => {
     return windowRegistry.performWindowAction(payload)
   })

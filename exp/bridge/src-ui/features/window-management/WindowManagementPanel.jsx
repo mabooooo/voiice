@@ -44,6 +44,8 @@ export function WindowManagementPanel({ onLog }) {
   const [windowDialogOpen, setWindowDialogOpen] = useState(false)
   const [windowMoveForm, setWindowMoveForm] = useState({ x: '', y: '', width: '', height: '' })
   const [windowBusy, setWindowBusy] = useState(false)
+  const [automationBusy, setAutomationBusy] = useState(false)
+  const [windowAutomation, setWindowAutomation] = useState(null)
 
   useEffect(() => {
     refreshWindows()
@@ -79,6 +81,7 @@ export function WindowManagementPanel({ onLog }) {
     try {
       const detail = await window.bridgeApi.getWindowDetail(handle)
       setSelectedWindow(detail.item)
+      setWindowAutomation(null)
       syncMoveForm(detail.item)
       setWindowDialogOpen(true)
     } catch (error) {
@@ -131,6 +134,29 @@ export function WindowManagementPanel({ onLog }) {
     }
   }
 
+  // UI Automation 当前只做被动读取，便于先验证结构和字段，再决定是否开放主动操作。
+  async function loadWindowAutomation() {
+    if (!selectedWindow?.handle) return
+
+    setAutomationBusy(true)
+    try {
+      const result = await window.bridgeApi.getWindowAutomation({
+        handle: selectedWindow.handle,
+        options: {
+          maxDepth: 4,
+          maxChildren: 40,
+          textPreviewLength: 200,
+        },
+      })
+      setWindowAutomation(result.automation)
+      appendWindowLog(`已获取窗口 UI Automation：${selectedWindow.shortId || selectedWindow.handle}`)
+    } catch (error) {
+      appendWindowLog(`获取窗口 UI Automation 失败: ${error.message || error}`)
+    } finally {
+      setAutomationBusy(false)
+    }
+  }
+
   return (
     <>
       <section className="side-section">
@@ -170,6 +196,22 @@ export function WindowManagementPanel({ onLog }) {
               <Input value={windowMoveForm.width} onChange={(event) => setWindowMoveForm((current) => ({ ...current, width: event.target.value }))} placeholder="width" />
               <Input value={windowMoveForm.height} onChange={(event) => setWindowMoveForm((current) => ({ ...current, height: event.target.value }))} placeholder="height" />
             </div>
+          </section>
+          <section className="subpanel dialog-grid__full">
+            <div className="side-section__row">
+              <div className="subpanel__title">UI Automation（只读）</div>
+              <Button variant="secondary" size="sm" onClick={loadWindowAutomation} disabled={automationBusy || windowBusy}>
+                {automationBusy ? '获取中...' : '获取UI'}
+              </Button>
+            </div>
+            <div className="helper-text">
+              返回当前窗口的 UIA 控件树与常用 Pattern 状态，不执行点击、输入或滚动等主动操作。
+            </div>
+            <ScrollArea className="window-automation-view">
+              <pre className="console-block console-block--compact">
+                {formatJson(windowAutomation || { mode: 'passive', status: '尚未获取 UI Automation' })}
+              </pre>
+            </ScrollArea>
           </section>
         </div>
         <DialogFooter>

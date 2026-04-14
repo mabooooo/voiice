@@ -206,10 +206,49 @@ function sanitizeLlmPlan(plan, windows) {
   return sanitized
 }
 
+function extractJsonCandidates(raw) {
+  const trimmed = String(raw || '').trim()
+  if (!trimmed) {
+    return []
+  }
+
+  const candidates = []
+  const fencedBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+
+  for (const block of fencedBlocks) {
+    const content = String(block[1] || '').trim()
+    if (content) {
+      candidates.push(content)
+    }
+  }
+
+  candidates.push(trimmed)
+
+  const firstBraceIndex = trimmed.indexOf('{')
+  const lastBraceIndex = trimmed.lastIndexOf('}')
+  if (firstBraceIndex >= 0 && lastBraceIndex > firstBraceIndex) {
+    candidates.push(trimmed.slice(firstBraceIndex, lastBraceIndex + 1))
+  }
+
+  return [...new Set(candidates)]
+}
+
+function safeParseLlmJson(raw) {
+  // LLM 偶尔会把 JSON 包在 ```json 代码块里，这里按候选顺序做兼容解析。
+  for (const candidate of extractJsonCandidates(raw)) {
+    try {
+      return JSON.parse(candidate)
+    } catch {}
+  }
+
+  throw new Error('Unable to parse JSON from LLM content')
+}
+
 function finalizeIntentResult(raw, transcriptFallback, windows, parser) {
   try {
-    const parsed = JSON.parse(raw)
-    const transcript = String(parsed.stt || transcriptFallback || '').trim()
+    const parsed = safeParseLlmJson(raw)
+    // 同时兼容 `stt` 和 `translate`，避免不同 prompt 模板下字段名不一致。
+    const transcript = String(parsed.stt || parsed.translate || transcriptFallback || '').trim()
     const plan = sanitizeLlmPlan(parsed.plan, windows)
 
     return {

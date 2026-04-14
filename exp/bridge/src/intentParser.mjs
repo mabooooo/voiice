@@ -1,8 +1,8 @@
 import path from 'node:path'
 
 import { parseActionsFromTranscript } from './commandMatcher.mjs'
-import { logLlmPrompt, logLlmResponse } from './llmDebug.mjs'
-import { buildProviderExtraBody, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
+import { logLlmPrompt, logLlmRequest, logLlmResponse } from './llmDebug.mjs'
+import { buildProviderBodyExtensions, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
 import { buildAudioDataUrl, prepareAudioForUpload } from './transcribeQwen.mjs'
 
 function buildWindowSummary(windows) {
@@ -217,7 +217,7 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
 
   const provider = normalizeProvider(options.provider)
   const { client, config } = createCompatibleClient(provider)
-  const extraBody = buildProviderExtraBody(provider)
+  const bodyExtensions = buildProviderBodyExtensions(provider)
 
   const userPrompt = buildIntentUserPrompt(transcript, windows)
 
@@ -225,13 +225,15 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
     provider,
     model: config.model,
     prompt: userPrompt,
+    // 这里显式打印最终会并入请求 body 根层的扩展字段，便于核对 provider 特殊参数。
+    requestBodyExtensions: bodyExtensions,
   })
 
-  const completion = await client.chat.completions.create({
+  const requestPayload = {
     model: config.model,
     stream: false,
     modalities: ['text'],
-    extra_body: extraBody,
+    ...bodyExtensions,
     messages: [
       {
         role: 'system',
@@ -242,7 +244,11 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
         content: userPrompt,
       },
     ],
-  })
+  }
+
+  logLlmRequest('parseIntentWithWindows', requestPayload)
+
+  const completion = await client.chat.completions.create(requestPayload)
 
   const raw = completion.choices?.[0]?.message?.content?.trim() || ''
   logLlmResponse('parseIntentWithWindows', raw)
@@ -253,7 +259,7 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
 export async function parseAudioIntentWithWindows(filePath, windows, options = {}) {
   const provider = normalizeProvider(options.provider)
   const { client, config } = createCompatibleClient(provider)
-  const extraBody = buildProviderExtraBody(provider)
+  const bodyExtensions = buildProviderBodyExtensions(provider)
   // 语音链路固定关闭流式，避免分片输出增加状态复杂度。
   const stream = false
   const userPrompt = buildAudioIntentUserPrompt(windows)
@@ -263,6 +269,8 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
     provider,
     model: config.model,
     prompt: userPrompt,
+    // 音频 data URL 不进日志，只打印真正附加到请求 body 根层的控制字段。
+    requestBodyExtensions: bodyExtensions,
     audioFilePath: path.resolve(filePath),
     audioFormat: format,
     convertedInputToWav: converted,
@@ -277,7 +285,7 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
   const requestPayload = {
     model: config.model,
     modalities: ['text'],
-    extra_body: extraBody,
+    ...bodyExtensions,
     messages: [
       {
         role: 'system',
@@ -301,6 +309,8 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
       },
     ],
   }
+
+  logLlmRequest('parseAudioIntentWithWindows', requestPayload)
 
   if (stream) {
     // 流式模式只统计首字延迟，最终仍以完整 JSON 文本作为解析结果。

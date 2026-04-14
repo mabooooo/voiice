@@ -4,8 +4,8 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 
 import ffmpegPath from 'ffmpeg-static'
-import { logLlmPrompt, logLlmResponse } from './llmDebug.mjs'
-import { buildProviderExtraBody, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
+import { logLlmPrompt, logLlmRequest, logLlmResponse } from './llmDebug.mjs'
+import { buildProviderBodyExtensions, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
 
 const DIRECT_AUDIO_FORMATS = new Set(['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'])
 
@@ -71,12 +71,12 @@ export async function transcribeCommandAudio(filePath, options = {}) {
 
   const { uploadPath, format, converted } = await prepareAudioForUpload(path.resolve(filePath))
   const { client, config } = createCompatibleClient(provider)
-  const extraBody = buildProviderExtraBody(provider)
+  const bodyExtensions = buildProviderBodyExtensions(provider)
 
   const requestPayload = {
     model: config.model,
     modalities: ['text'],
-    extra_body: extraBody,
+    ...bodyExtensions,
     messages: [
       {
         role: 'user',
@@ -102,7 +102,10 @@ export async function transcribeCommandAudio(filePath, options = {}) {
     provider,
     model: config.model,
     prompt,
+    // 这里补充根层请求字段，方便确认 Xiaomi 的 thinking 配置是否已带上。
+    requestBodyExtensions: bodyExtensions,
   })
+  logLlmRequest('transcribeQwen', requestPayload)
 
   const requestStartedAt = Date.now()
   let transcript = ''

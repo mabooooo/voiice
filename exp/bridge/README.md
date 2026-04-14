@@ -67,7 +67,7 @@ XIAOMI_MIMO_MODEL=mimo-v2-omni
 }
 ```
 
-当前项目已在请求的 `extra_body` 中自动补齐该配置，并继续统一传递 `enable_thinking: false`。
+当前项目会把这组字段直接写到最终请求 body 根层，并继续统一传递 `enable_thinking: false`。
 
 ## 启动
 

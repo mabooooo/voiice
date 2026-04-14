@@ -3,7 +3,7 @@
 
 ### Changed
 
-- Xiaomi MiMo 请求现在会在 `extra_body` 中额外补齐 `thinking.type = disable`，避免仅传 `enable_thinking: false` 时的兼容问题。
+- Xiaomi MiMo 请求现在会在最终请求 body 根层额外补齐 `thinking.type = disable`，避免仅传 `enable_thinking: false` 时的兼容问题。
 - README 补充 Xiaomi provider 的使用说明，明确请求 body 需要关闭 thinking。
 - 语音链路和手动文本指令链路都会按当前 UI 选择的 provider 发起请求。
 - 主进程 `get-config-status` 现在会返回两套 provider 的状态，供前端设置页展示。

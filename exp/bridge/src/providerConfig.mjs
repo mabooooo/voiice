@@ -56,20 +56,20 @@ export function listProviderStatuses() {
   )
 }
 
-// 统一收口 provider 额外请求体，避免 Xiaomi 特殊参数散落在调用侧。
-export function buildProviderExtraBody(provider) {
+// 统一收口 provider 的根层请求字段，避免 Xiaomi 特殊参数散落在调用侧。
+export function buildProviderBodyExtensions(provider) {
   const normalizedProvider = normalizeProvider(provider)
-  const extraBody = {
+  const bodyExtensions = {
     enable_thinking: false,
   }
 
   if (normalizedProvider === 'xiaomi') {
-    extraBody.thinking = {
-      type: 'disable',
+    bodyExtensions.thinking = {
+      type: 'disabled',
     }
   }
 
-  return extraBody
+  return bodyExtensions
 }
 
 // OpenAI 兼容 provider 都从这里创建 client，调用侧只关心 provider id。

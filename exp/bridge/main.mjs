@@ -117,7 +117,8 @@ async function executeBridgePlan(plan) {
       // 指定窗口动作必须按原顺序执行，否则后续键盘输入会落到错误窗口。
       const result = await windowRegistry.performWindowAction({
         action: step.action === 'focus_window' ? 'focus' : 'close',
-        handle: step.args?.handle || step.args?.shortId,
+        // 执行层同时兼容 handle / shortId / id，避免上游字段名差异导致误回退。
+        handle: step.args?.handle || step.args?.shortId || step.args?.id,
         processId: step.args?.processId,
       })
 
@@ -266,7 +267,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {
     const analysis = await transcribeCommandAudio(payload.filePath, {
       stream: payload.stream,
-      prompt: payload.prompt,
     })
 
     const windows = await windowRegistry.listWindows()

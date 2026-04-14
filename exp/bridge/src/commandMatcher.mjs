@@ -49,7 +49,7 @@ function matchOpenApp(segment, normalizedSegment) {
 function matchCloseWindow(segment, normalizedSegment) {
   if (/(关闭|关掉).*(窗口|页面|标签|程序)/.test(normalizedSegment)) {
     return {
-      action: 'close_front_window',
+      action: 'close_current',
       source: segment,
     }
   }
@@ -60,7 +60,7 @@ function matchCloseWindow(segment, normalizedSegment) {
 function matchFocusWindow(segment, normalizedSegment) {
   if (/(聚焦|激活|切到|切换到).*(窗口|前台|当前)/.test(normalizedSegment)) {
     return {
-      action: 'focus_front_window',
+      action: 'focus_current',
       source: segment,
     }
   }
@@ -80,7 +80,7 @@ function matchTypeText(segment, normalizedSegment) {
   }
 
   return {
-    action: 'type_text_to_focused_input',
+    action: 'input_text',
     args: { text },
     source: segment,
   }

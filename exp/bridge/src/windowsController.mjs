@@ -2,9 +2,9 @@ import path from 'node:path'
 import { runPowerShell } from './powershell.mjs'
 
 const ALLOWED_ACTIONS = new Set([
-  'focus_front_window',
-  'close_front_window',
-  'type_text_to_focused_input',
+  'focus_current',
+  'close_current',
+  'input_text',
   'open_app',
   'send_shortcut',
   'move_mouse_to_center',
@@ -44,7 +44,7 @@ $hwnd = [BridgeWin32]::GetForegroundWindow()
 if ($hwnd -eq [IntPtr]::Zero) { throw "No foreground window" }
 [BridgeWin32]::ShowWindowAsync($hwnd, 5) | Out-Null
 [BridgeWin32]::SetForegroundWindow($hwnd) | Out-Null
-Write-Output "focus_front_window"
+Write-Output "focus_current"
 `
 
   return runPowerShell(script)
@@ -56,19 +56,19 @@ ${buildForegroundWindowScript()}
 $hwnd = [BridgeWin32]::GetForegroundWindow()
 if ($hwnd -eq [IntPtr]::Zero) { throw "No foreground window" }
 [BridgeWin32]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-Write-Output "close_front_window"
+Write-Output "close_current"
 `
 
   return runPowerShell(script)
 }
 
-async function typeTextToFocusedInput(text) {
+async function inputText(text) {
   const escapedText = escapeSendKeysLiteral(text)
   const script = `
 $wshell = New-Object -ComObject WScript.Shell
 Start-Sleep -Milliseconds 120
 $wshell.SendKeys('${escapedText}')
-Write-Output "type_text_to_focused_input"
+Write-Output "input_text"
 `
 
   return runPowerShell(script)
@@ -170,12 +170,12 @@ async function executeStep(step) {
   }
 
   switch (step.action) {
-    case 'focus_front_window':
+    case 'focus_current':
       return focusFrontWindow()
-    case 'close_front_window':
+    case 'close_current':
       return closeFrontWindow()
-    case 'type_text_to_focused_input':
-      return typeTextToFocusedInput(step.args?.text ?? '')
+    case 'input_text':
+      return inputText(step.args?.text ?? '')
     case 'open_app':
       return openApp(step.args?.name ?? '')
     case 'send_shortcut':

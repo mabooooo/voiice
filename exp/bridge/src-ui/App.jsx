@@ -22,8 +22,8 @@ const SPECIAL_SHORTCUT_LABELS = {
 }
 
 const MANUAL_ACTIONS = [
-  { label: 'focus_front_window', plan: [{ action: 'focus_front_window' }] },
-  { label: 'close_front_window', plan: [{ action: 'close_front_window' }] },
+  { label: 'focus_current', plan: [{ action: 'focus_current' }] },
+  { label: 'close_current', plan: [{ action: 'close_current' }] },
   { label: 'open_app("WeChat")', plan: [{ action: 'open_app', args: { name: 'WeChat' } }] },
   { label: 'send_shortcut("cmd+w")', plan: [{ action: 'send_shortcut', args: { shortcut: 'cmd+w' } }] },
 ]
@@ -86,10 +86,12 @@ function formatActionList(items) {
   return items.map((item) => {
     if (item.action === 'open_app') return `open_app(${item.args?.name ?? ''})`
     if (item.action === 'send_shortcut') return `send_shortcut(${item.args?.shortcut ?? ''})`
-    if (item.action === 'type_text_to_focused_input') return `type_text_to_focused_input(${item.args?.text ?? ''})`
-    if (item.action === 'focus_window' || item.action === 'close_window') return `${item.action}(${item.args?.shortId ?? item.args?.handle ?? ''})`
-    return item.action
-  }).join(', ')
+      if (item.action === 'input_text') return `input_text(${item.args?.text ?? ''})`
+      if (item.action === 'focus_current') return 'focus_current()'
+      if (item.action === 'close_current') return 'close_current()'
+      if (item.action === 'focus_window' || item.action === 'close_window') return `${item.action}(${item.args?.shortId ?? item.args?.handle ?? ''})`
+      return item.action
+    }).join(', ')
 }
 
 function WindowListItem({ item, onOpen }) {
@@ -130,7 +132,6 @@ export function App() {
   const [configStatus, setConfigStatus] = useState('读取配置中...')
   const [activeMenu, setActiveMenu] = useState(() => localStorage.getItem(STORAGE_KEYS.activeMenu) || ACTIVE_MENU.developer)
   const [audioPath, setAudioPath] = useState('')
-  const [prompt, setPrompt] = useState('如果语音表达的是桌面操作意图，请只返回对应的操作意图文本，不要解释；否则请简短回答用户的问题。')
   const [stream, setStream] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
@@ -372,16 +373,23 @@ export function App() {
     window.bridgeApi.notifyOverlayState({ status: 'waiting', title: '识别中', subtitle: '等待服务器返回...' })
 
     try {
-      const result = await window.bridgeApi.analyzeAudio({ filePath, stream, prompt: prompt.trim() })
+      const result = await window.bridgeApi.analyzeAudio({ filePath, stream })
       setTranscript(result.transcript || '')
       setPlan(result.matched?.plan || [])
       setTiming(result.timing || {})
       setUsage(result.usage || {})
       appendLog(`转写完成，匹配到 ${(result.matched?.plan || []).length} 个白名单动作：${formatActionList(result.matched?.plan || [])}`)
-      if ((result.matched?.plan || []).length > 0) await executePlan(result.matched.plan)
+      if ((result.matched?.plan || []).length > 0) {
+        await executePlan(result.matched.plan, {
+          stt: result.matched?.stt || result.transcript,
+        })
+      }
       else {
         window.bridgeApi.notifyOverlayState({
-          status: 'executing', title: '已返回', subtitle: result.transcript || '未匹配到动作', autoResetMs: 4000,
+          status: 'executing',
+          title: '已返回',
+          subtitle: result.matched?.stt || result.transcript || '未匹配到动作',
+          autoResetMs: 4000,
         })
       }
     } catch (error) {
@@ -444,7 +452,7 @@ export function App() {
     meterFrameRef.current = requestAnimationFrame(tick)
   }
 
-  async function executePlan(nextPlan) {
+  async function executePlan(nextPlan, options = {}) {
     if (!nextPlan || nextPlan.length === 0) {
       appendLog('当前没有可执行的动作。')
       return
@@ -454,7 +462,10 @@ export function App() {
       const result = await window.bridgeApi.executePlan({ plan: nextPlan })
       appendLog(`执行完成: ${formatJson(result)}`)
       window.bridgeApi.notifyOverlayState({
-        status: 'executing', title: '已执行', subtitle: formatActionList(nextPlan), autoResetMs: 4000,
+        status: 'executing',
+        title: '已执行',
+        subtitle: options.stt || formatActionList(nextPlan),
+        autoResetMs: 4000,
       })
     } catch (error) {
       appendLog(`执行失败: ${error.message || error}`)
@@ -476,7 +487,7 @@ export function App() {
       setTiming({})
       setUsage({})
       appendLog(`文本指令已匹配 ${(matched.plan || []).length} 个动作：${formatActionList(matched.plan || [])}`)
-      if ((matched.plan || []).length > 0) await executePlan(matched.plan)
+      if ((matched.plan || []).length > 0) await executePlan(matched.plan, { stt: matched.stt || manualCommand.trim() })
     } catch (error) {
       appendLog(`文本指令匹配失败: ${error.message || error}`)
     }
@@ -654,10 +665,6 @@ export function App() {
                     <Button variant="secondary" onClick={pickAudioFile}>选择文件</Button>
                   </div>
                 </label>
-                <label className="field">
-                  <span className="field__label">转写提示词</span>
-                  <Textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-                </label>
                 <div className="field">
                   <span className="field__label">麦克风测试</span>
                   <div className="row">
@@ -721,7 +728,7 @@ export function App() {
             <section className="side-section">
               <div className="subpanel__title">直接输入文本</div>
               <Input value={typeText} onChange={(event) => setTypeText(event.target.value)} placeholder="输入要发送到当前焦点输入框的文本" />
-              <Button variant="secondary" className="button-wide" onClick={() => executePlan([{ action: 'type_text_to_focused_input', args: { text: typeText.trim() } }])}>type_text_to_focused_input</Button>
+              <Button variant="secondary" className="button-wide" onClick={() => executePlan([{ action: 'input_text', args: { text: typeText.trim() } }])}>input_text</Button>
             </section>
             <section className="side-section">
               <div className="subpanel__title">高权限测试（仅手动）</div>

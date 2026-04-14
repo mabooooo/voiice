@@ -1,4 +1,26 @@
 # Changelog
+## 0.0.10 窗口 id 兼容、函数集简化与 PowerShell 清洗
+
+### Added
+
+- 新增 `input` 动作语义，模型现在可以直接返回需要写入焦点输入框的文本内容。
+
+### Changed
+
+- 将模型可选函数收敛为更短的 canonical names：`focus_current`、`close_current`、`focus_window`、`close_window`、`input_text`、`open_app`、`send_shortcut`。
+- LLM 提示词改为单独列出函数名称和最小参数格式，减少 token 占用并提高函数选择准确率。
+- UI 中删除"转写提示词"，转写阶段改为固定内置 prompt，只做音频转文字。
+- 执行态悬浮卡片的副标题改为优先显示模型返回的 `.stt` 字段，而不是动作列表。
+- 手动文本指令和 fallback 规则路径现在也会回填 `stt`，保持执行态展示一致。
+- 内部输入动作 helper 命名统一收敛到 `input_text` 语义，减少旧命名残留。
+
+### Fixed
+
+- 修复 LLM 返回 `focus_window({id:"W14"})` / `close_window({id:"W14"})` 时未被识别的问题，执行层现在同时兼容 `id / shortId / handle`。
+- 修复窗口动作因 `id` 未命中而误回退到本地规则、最终错误执行 `open_app` 的问题。
+- PowerShell 错误输出现在会清洗 CLIXML 与"正在准备首次使用模块"进度噪音，只保留可读错误正文。
+- 执行态悬浮卡片继续保留 `.stt` 展示，同时 `input_text` 与旧输入动作统一收敛到同一执行路径。
+
 
 ## 0.0.9 左侧导航栏+麦克风选择
 

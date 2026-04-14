@@ -12,6 +12,40 @@ ${script}
   return Buffer.from(wrappedScript, 'utf16le').toString('base64')
 }
 
+function decodeCliXmlEntities(text) {
+  return text
+    .replace(/_x000D__x000A_/g, '\n')
+    .replace(/_x000D_/g, '\r')
+    .replace(/_x000A_/g, '\n')
+}
+
+function sanitizePowerShellError(rawText) {
+  const text = decodeCliXmlEntities(String(rawText || '')).trim()
+  if (!text) {
+    return ''
+  }
+
+  if (!text.includes('<Objs') && !text.includes('#< CLIXML')) {
+    return text
+  }
+
+  // 只提取 PowerShell 错误正文，避免把 CLIXML 和进度噪音直接抛给界面。
+  const errorMessages = [...text.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)]
+    .map((item) => item[1].trim())
+    .filter(Boolean)
+    .filter((item) => !item.includes('正在准备首次使用模块'))
+
+  if (errorMessages.length > 0) {
+    return errorMessages.join('\n')
+  }
+
+  return text
+    .replace(/#<\s*CLIXML/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export function runPowerShell(script) {
   return new Promise((resolve, reject) => {
     const encodedCommand = buildEncodedCommand(script)
@@ -45,7 +79,8 @@ export function runPowerShell(script) {
         return
       }
 
-      reject(new Error(stderr || `PowerShell failed with code ${code}`))
+      const cleanedError = sanitizePowerShellError(stderr || stdout)
+      reject(new Error(cleanedError || `PowerShell failed with code ${code}`))
     })
   })
 }

@@ -41,9 +41,12 @@ function sanitizeLlmPlan(plan, windows) {
     }
 
     if (item.action === 'focus_window' || item.action === 'close_window') {
+      // 兼容 LLM 返回的 id/shortId/handle，统一折叠到当前窗口快照。
+      const requestedId = String(item.args?.id ?? '')
       const target =
         windowMapByHandle.get(String(item.args?.handle ?? '')) ||
-        windowMapByShortId.get(String(item.args?.shortId ?? ''))
+        windowMapByShortId.get(String(item.args?.shortId ?? '')) ||
+        windowMapByShortId.get(requestedId)
 
       if (!target) {
         continue
@@ -81,16 +84,16 @@ function sanitizeLlmPlan(plan, windows) {
       continue
     }
 
-    if (item.action === 'type_text_to_focused_input' && typeof item.args?.text === 'string' && item.args.text.trim()) {
+    if (item.action === 'input_text' && typeof item.args?.text === 'string' && item.args.text.trim()) {
       sanitized.push({
-        action: 'type_text_to_focused_input',
+        action: 'input_text',
         args: { text: item.args.text.trim() },
         source: item.source || 'llm',
       })
       continue
     }
 
-    if (item.action === 'focus_front_window' || item.action === 'close_front_window') {
+    if (item.action === 'focus_current' || item.action === 'close_current') {
       sanitized.push({
         action: item.action,
         source: item.source || 'llm',
@@ -117,7 +120,7 @@ export async function parseIntentWithWindows(commandText, windows) {
   const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
 
   const windowSummary = buildWindowSummary(windows)
-  const userPrompt = `请根据用户指令和当前窗口列表，返回 JSON：{"plan":[{"action":"...","args":{...},"source":"..."}],"stt":"音频转文字结果"}\n\n用户指令：${transcript}\n\n当前窗口列表：\n${windowSummary}\n\n规则：\n1. 只返回 JSON，不要解释。\n2. 只允许动作：focus_front_window、close_front_window、focus_window、close_window、type_text_to_focused_input、open_app、send_shortcut。\n3. 如果用户明确提到某个现有窗口，或提到某个已经在窗口列表中的应用，例如“打开微信”“打开 Notion”，优先理解为把该应用现有窗口拉到最前，返回 focus_window，并使用窗口 id。\n4. 只有当窗口列表里不存在该应用的窗口时，才允许返回 open_app。\n5. 如果是模糊的“关闭这个窗口/聚焦当前窗口”，可返回 close_front_window / focus_front_window。\n6. 若要关闭/聚焦具体窗口，必须返回 close_window / focus_window，并在 args 中带上 shortId 或 handle。优先使用 shortId。\n7. send_shortcut 只允许 cmd+w、ctrl+w、alt+f4。\n8. 无法确定时返回空数组。`
+  const userPrompt = `返回 JSON：{"plan":[{"action":"...","args":{...}}],"stt":"..."}\n用户指令：${transcript}\n窗口：\n${windowSummary}\n函数：focus_current(), close_current(), focus_window({id:"W03"}), close_window({id:"W03"}), input_text({text:""}), open_app({name:""}), send_shortcut({shortcut:"ctrl+w"})\n规则：\n1. 只返回 JSON。\n2. 已有应用窗口时，“打开A”优先用 focus_window，不用 open_app。\n3. “关闭这个窗口/切到当前窗口”用 close_current / focus_current。\n4. 具体窗口只用 focus_window / close_window，args 里只放 id，优先 shortId。\n5. 输入、回复、填写文本都用 input_text，args.text 直接放最终内容。\n6. send_shortcut 只允许 cmd+w、ctrl+w、alt+f4。\n7. 不确定就返回空数组。`
 
   logLlmPrompt('parseIntentWithWindows', userPrompt)
 
@@ -132,7 +135,7 @@ export async function parseIntentWithWindows(commandText, windows) {
       {
         role: 'system',
         content:
-          '你是桌面动作解析器。你只能返回 JSON，不能解释。你只能从白名单动作中选择：focus_front_window, close_front_window, focus_window, close_window, type_text_to_focused_input, open_app, send_shortcut。若是 focus_window / close_window，必须从给定窗口列表中选择 shortId 或 handle。若无法确定，返回空数组。',
+          '你是桌面动作解析器。你只能返回 JSON，不能解释。你只能从这些函数中选择：focus_current, close_current, focus_window, close_window, input_text, open_app, send_shortcut。具体窗口动作必须从给定窗口列表里选择 id。输入文本一律使用 input_text，并提供 args.text。若无法确定，返回空数组。',
       },
       {
         role: 'user',
@@ -147,9 +150,22 @@ export async function parseIntentWithWindows(commandText, windows) {
   try {
     const parsed = JSON.parse(raw)
     const plan = sanitizeLlmPlan(parsed.plan, windows)
+    if (plan.length === 0) {
+      const fallback = parseActionsFromTranscript(transcript)
+      if (fallback.plan.length > 0) {
+        return {
+          ...fallback,
+          stt: parsed.stt || transcript,
+          parser: 'fallback-after-empty-llm',
+          raw,
+        }
+      }
+    }
+
     return {
       transcript,
       plan,
+      stt: parsed.stt || transcript,
       unmatchedSegments: plan.length > 0 ? [] : [transcript],
       safe: plan.length > 0,
       parser: 'llm',
@@ -159,6 +175,7 @@ export async function parseIntentWithWindows(commandText, windows) {
     const fallback = parseActionsFromTranscript(transcript)
     return {
       ...fallback,
+      stt: transcript,
       parser: 'fallback-rule',
       raw,
     }

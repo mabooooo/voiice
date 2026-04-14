@@ -68,7 +68,8 @@ export async function transcribeCommandAudio(filePath, options = {}) {
   const baseURL = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
   const stream = Boolean(options.stream)
-  const prompt = options.prompt?.trim() || '请只返回这段语音对应的操作意图文本，不要解释。'
+  // 转写阶段只负责把音频变成稳定文本，动作选择交给后续解析器。
+  const prompt = '请将这段音频准确转写为简短中文文本，不要解释，不要补充。'
 
   if (!apiKey) {
     throw new Error('未读取到 DASHSCOPE_API_KEY，请先在 exp/bridge/.env 中配置。')

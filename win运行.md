@@ -1,0 +1,1 @@
+cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && set PATH=%USERPROFILE%\.cargo\bin;%PATH% && cd /d D:\Projects\AI\voiice && npm run tauri dev'

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice Bridge</title>
+    <link rel="stylesheet" href="./renderer.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Bridge / Windows Electron</p>
+          <h1>语音控制桌面白名单动作</h1>
+          <p class="hero-copy">
+            先将音频转成文本，再由本地规则匹配白名单行为，最后才执行系统动作。
+          </p>
+        </div>
+        <div class="status-card" id="configStatus">读取配置中...</div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>音频输入</h2>
+            <label class="inline-toggle">
+              <input id="streamToggle" type="checkbox" />
+              <span>流式转写</span>
+            </label>
+          </div>
+
+          <div class="field-group">
+            <label for="audioPath">音频文件</label>
+            <div class="inline-row">
+              <input id="audioPath" type="text" placeholder="选择 mp3 / wav / webm ..." readonly />
+              <button id="pickAudioButton" class="ghost">选择文件</button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="promptInput">转写提示词</label>
+            <textarea id="promptInput" rows="4">请只返回这段语音对应的操作意图文本，不要解释。</textarea>
+          </div>
+
+          <div class="field-group">
+            <label>麦克风测试</label>
+            <div class="inline-row">
+              <button id="recordButton">开始录音</button>
+              <button id="stopButton" class="ghost" disabled>停止并导入</button>
+              <span id="recordingState" class="hint">未录音</span>
+            </div>
+          </div>
+
+          <div class="inline-row">
+            <button id="analyzeButton" class="primary">转写并匹配动作</button>
+            <label class="inline-toggle">
+              <input id="autoExecuteToggle" type="checkbox" />
+              <span>自动执行匹配结果</span>
+            </label>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>分析结果</h2>
+            <button id="executeButton" class="ghost" disabled>执行白名单动作</button>
+          </div>
+
+          <div class="result-grid">
+            <div>
+              <h3>Transcript</h3>
+              <pre id="transcriptOutput" class="output"></pre>
+            </div>
+            <div>
+              <h3>Matched Plan</h3>
+              <pre id="planOutput" class="output"></pre>
+            </div>
+          </div>
+
+          <div class="result-grid">
+            <div>
+              <h3>Timing</h3>
+              <pre id="timingOutput" class="output small"></pre>
+            </div>
+            <div>
+              <h3>Usage</h3>
+              <pre id="usageOutput" class="output small"></pre>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="logOutput">执行日志</label>
+            <pre id="logOutput" class="output log"></pre>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>手动白名单测试</h2>
+        </div>
+
+        <div class="manual-grid">
+          <button data-plan='[{"action":"focus_front_window"}]'>focus_front_window</button>
+          <button data-plan='[{"action":"close_front_window"}]'>close_front_window</button>
+          <button data-plan='[{"action":"open_app","args":{"name":"WeChat"}}]'>open_app("WeChat")</button>
+          <button data-plan='[{"action":"send_shortcut","args":{"shortcut":"cmd+w"}}]'>send_shortcut("cmd+w")</button>
+        </div>
+
+        <div class="field-group">
+          <label for="typeTextInput">type_text_to_focused_input</label>
+          <div class="inline-row">
+            <input id="typeTextInput" type="text" placeholder="输入要发送的文本" />
+            <button id="typeTextButton" class="ghost">执行打字</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>高权限测试（仅手动）</label>
+          <div class="manual-grid">
+            <button data-plan='[{"action":"move_mouse_to_center"}]'>move_mouse_to_center</button>
+            <button data-plan='[{"action":"left_click_current_position"}]'>left_click_current_position</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./renderer.mjs"></script>
+  </body>
+</html>

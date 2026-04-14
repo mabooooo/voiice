@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { runPowerShell } from './powershell.mjs'
 
 const ALLOWED_ACTIONS = new Set([
   'focus_front_window',
@@ -15,39 +15,6 @@ const SHORTCUT_MAP = {
   'cmd+w': '^w',
   'ctrl+w': '^w',
   'alt+f4': '%{F4}',
-}
-
-function runPowerShell(script) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      {
-        windowsHide: true,
-      },
-    )
-
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString()
-    })
-
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve({ stdout: stdout.trim(), stderr: stderr.trim() })
-        return
-      }
-
-      reject(new Error(stderr || `PowerShell failed with code ${code}`))
-    })
-  })
 }
 
 function escapeSendKeysLiteral(text) {

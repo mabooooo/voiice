@@ -8,6 +8,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 
 import { parseActionsFromTranscript } from './src/commandMatcher.mjs'
 import { transcribeCommandAudio } from './src/transcribeQwen.mjs'
+import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -16,6 +17,8 @@ const __dirname = path.dirname(__filename)
 dotenv.config({
   path: path.join(__dirname, '.env'),
 })
+
+const windowRegistry = new WindowRegistry()
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -106,6 +109,23 @@ app.whenReady().then(() => {
 
   ipcMain.handle('bridge:execute-plan', async (_event, payload) => {
     return executeActionPlan(payload.plan)
+  })
+
+  ipcMain.handle('bridge:list-windows', async () => {
+    return windowRegistry.listWindows()
+  })
+
+  ipcMain.handle('bridge:refresh-windows', async () => {
+    // 窗口列表由主进程维护快照，前端通过手动刷新更新状态。
+    return windowRegistry.refreshSnapshot()
+  })
+
+  ipcMain.handle('bridge:get-window-detail', async (_event, handle) => {
+    return windowRegistry.getWindowDetail(handle)
+  })
+
+  ipcMain.handle('bridge:window-action', async (_event, payload) => {
+    return windowRegistry.performWindowAction(payload)
   })
 
   app.on('activate', () => {

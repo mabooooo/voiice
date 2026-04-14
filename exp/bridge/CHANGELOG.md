@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.5
+
+### Fixed
+
+- 加固窗口关闭逻辑：由单纯 `WM_CLOSE` 调整为“先聚焦，再尝试 `CloseMainWindow()`，最后回退窗口关闭消息”。
+- 窗口动作请求现在会同时携带 `processId`，便于优雅关闭主窗口。
+
+## 0.0.4
+
+### Added
+
+- 新增主进程窗口快照实例 `WindowRegistry`，支持手动刷新、窗口详情查询和窗口动作执行。
+- 新增窗口管理 IPC：`listWindows`、`refreshWindows`、`getWindowDetail`、`windowAction`。
+- 右侧侧栏新增系统窗口列表，点击后可弹窗查看应用名、句柄、位置尺寸等信息。
+- 窗口详情弹窗新增 `调起 / 聚焦`、`关闭窗口`、`移动窗口` 操作。
+
+### Changed
+
+- 右侧容器现在同时承载手动动作、文本指令与窗口管理能力。
+
 ## 0.0.3
 
 ### Fixed

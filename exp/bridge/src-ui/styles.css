@@ -349,6 +349,118 @@ textarea {
   gap: 10px;
 }
 
+.side-section__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.window-list {
+  max-height: 280px;
+  padding-right: 6px;
+}
+
+.window-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border-radius: calc(var(--radius) - 6px);
+  border: 1px solid var(--border);
+  background: #101012;
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.window-item:hover {
+  background: #17171b;
+  border-color: #3f3f46;
+}
+
+.window-item__title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.window-item__meta {
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.ui-button--sm {
+  min-height: 34px;
+  padding: 0.48rem 0.75rem;
+  font-size: 0.82rem;
+}
+
+.ui-dialog {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+
+.ui-dialog__overlay {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.74);
+}
+
+.ui-dialog__content {
+  position: relative;
+  width: min(860px, 100%);
+  border-radius: calc(var(--radius) + 2px);
+  border: 1px solid var(--border);
+  background: #0b0b0d;
+  padding: 20px;
+  box-shadow: 0 28px 100px rgba(0, 0, 0, 0.45);
+}
+
+.ui-dialog__header {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.ui-dialog__title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.ui-dialog__description {
+  margin: 0;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.ui-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.dialog-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 16px;
+}
+
+.move-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
 @media (max-width: 800px) {
   .app-layout,
   .content-grid,
@@ -373,5 +485,16 @@ textarea {
 
   .sidebar-card {
     position: static;
+  }
+
+  .dialog-grid,
+  .move-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .side-section__row,
+  .ui-dialog__footer {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

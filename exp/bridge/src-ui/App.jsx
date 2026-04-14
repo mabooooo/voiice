@@ -2,43 +2,38 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 
 const MANUAL_ACTIONS = [
-  {
-    label: 'focus_front_window',
-    plan: [{ action: 'focus_front_window' }],
-  },
-  {
-    label: 'close_front_window',
-    plan: [{ action: 'close_front_window' }],
-  },
-  {
-    label: 'open_app("WeChat")',
-    plan: [{ action: 'open_app', args: { name: 'WeChat' } }],
-  },
-  {
-    label: 'send_shortcut("cmd+w")',
-    plan: [{ action: 'send_shortcut', args: { shortcut: 'cmd+w' } }],
-  },
+  { label: 'focus_front_window', plan: [{ action: 'focus_front_window' }] },
+  { label: 'close_front_window', plan: [{ action: 'close_front_window' }] },
+  { label: 'open_app("WeChat")', plan: [{ action: 'open_app', args: { name: 'WeChat' } }] },
+  { label: 'send_shortcut("cmd+w")', plan: [{ action: 'send_shortcut', args: { shortcut: 'cmd+w' } }] },
 ]
 
 const PRIVILEGED_ACTIONS = [
-  {
-    label: 'move_mouse_to_center',
-    plan: [{ action: 'move_mouse_to_center' }],
-  },
-  {
-    label: 'left_click_current_position',
-    plan: [{ action: 'left_click_current_position' }],
-  },
+  { label: 'move_mouse_to_center', plan: [{ action: 'move_mouse_to_center' }] },
+  { label: 'left_click_current_position', plan: [{ action: 'left_click_current_position' }] },
 ]
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2)
+}
+
+function WindowListItem({ item, onOpen }) {
+  return (
+    <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
+      <span className="window-item__title">{item.title}</span>
+      <span className="window-item__meta">{item.appName || 'Unknown App'}</span>
+      <span className="window-item__meta">
+        {item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}
+      </span>
+    </button>
+  )
 }
 
 export function App() {
@@ -59,23 +54,103 @@ export function App() {
   const [recorder, setRecorder] = useState(null)
   const [mediaStream, setMediaStream] = useState(null)
   const [recordedChunks, setRecordedChunks] = useState([])
+  const [windowSnapshot, setWindowSnapshot] = useState({ items: [], updatedAt: null })
+  const [selectedWindow, setSelectedWindow] = useState(null)
+  const [windowDialogOpen, setWindowDialogOpen] = useState(false)
+  const [windowMoveForm, setWindowMoveForm] = useState({ x: '', y: '', width: '', height: '' })
+  const [windowBusy, setWindowBusy] = useState(false)
 
   const canExecutePlan = plan.length > 0
+  const renderedPlan = useMemo(() => formatJson(plan), [plan])
 
   function appendLog(message) {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    setLogs((current) => [`[${time}] ${message}`, ...current].slice(0, 60))
+    setLogs((current) => [`[${time}] ${message}`, ...current].slice(0, 80))
   }
 
   useEffect(() => {
-    // 初始化时读取主进程状态，便于快速确认环境是否完整。
+    // 初始化读取运行状态，并抓取一份窗口快照作为默认展示。
     window.bridgeApi
       .getConfigStatus()
       .then((status) => setConfigStatus(formatJson(status)))
       .catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
+
+    refreshWindows()
   }, [])
 
-  const renderedPlan = useMemo(() => formatJson(plan), [plan])
+  function syncMoveForm(item) {
+    setWindowMoveForm({
+      x: String(item?.bounds?.x ?? ''),
+      y: String(item?.bounds?.y ?? ''),
+      width: String(item?.bounds?.width ?? ''),
+      height: String(item?.bounds?.height ?? ''),
+    })
+  }
+
+  async function refreshWindows() {
+    try {
+      const snapshot = await window.bridgeApi.refreshWindows()
+      setWindowSnapshot(snapshot)
+      appendLog(`窗口列表已刷新，共 ${snapshot.items.length} 个窗口。`)
+    } catch (error) {
+      appendLog(`刷新窗口列表失败: ${error.message || error}`)
+    }
+  }
+
+  async function openWindowDetail(handle) {
+    setWindowBusy(true)
+    try {
+      const detail = await window.bridgeApi.getWindowDetail(handle)
+      setSelectedWindow(detail.item)
+      syncMoveForm(detail.item)
+      setWindowDialogOpen(true)
+    } catch (error) {
+      appendLog(`读取窗口详情失败: ${error.message || error}`)
+    } finally {
+      setWindowBusy(false)
+    }
+  }
+
+  async function runWindowAction(action) {
+    if (!selectedWindow?.handle) {
+      return
+    }
+
+    setWindowBusy(true)
+    try {
+      const payload = {
+        action,
+        handle: selectedWindow.handle,
+        processId: selectedWindow.processId,
+      }
+
+      if (action === 'move') {
+        payload.bounds = {
+          x: Number(windowMoveForm.x),
+          y: Number(windowMoveForm.y),
+          width: Number(windowMoveForm.width),
+          height: Number(windowMoveForm.height),
+        }
+      }
+
+      const result = await window.bridgeApi.windowAction(payload)
+      appendLog(`窗口动作执行完成: ${formatJson(result)}`)
+      await refreshWindows()
+
+      if (action === 'close') {
+        setWindowDialogOpen(false)
+        setSelectedWindow(null)
+      } else {
+        const detail = await window.bridgeApi.getWindowDetail(selectedWindow.handle)
+        setSelectedWindow(detail.item)
+        syncMoveForm(detail.item)
+      }
+    } catch (error) {
+      appendLog(`窗口动作执行失败: ${error.message || error}`)
+    } finally {
+      setWindowBusy(false)
+    }
+  }
 
   async function pickAudioFile() {
     const filePath = await window.bridgeApi.pickAudioFile()
@@ -168,7 +243,7 @@ export function App() {
       })
 
       mediaRecorder.addEventListener('stop', async () => {
-        // 录音结束后立即写入临时文件，方便复用既有分析链路。
+        // 录音结束后落盘，后续仍复用统一的音频分析链路。
         const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' })
         const arrayBuffer = await blob.arrayBuffer()
         const tempPath = await window.bridgeApi.saveRecording({
@@ -337,21 +412,14 @@ export function App() {
           <CardHeader className="sidebar-card__header">
             <div className="section-label">Manual Controls</div>
             <CardTitle>右侧动作列表</CardTitle>
-            <CardDescription>
-              手动白名单测试按钮和文本指令入口全部收进右侧容器，便于后续继续扩展。
-            </CardDescription>
+            <CardDescription>手动动作、文本指令和系统窗口列表都集中在右侧容器中。</CardDescription>
           </CardHeader>
           <CardContent className="sidebar-stack">
             <section className="side-section">
               <div className="subpanel__title">白名单动作</div>
               <div className="list-stack">
                 {MANUAL_ACTIONS.map((item) => (
-                  <Button
-                    key={item.label}
-                    variant="secondary"
-                    className="button-list"
-                    onClick={() => executePlan(item.plan)}
-                  >
+                  <Button key={item.label} variant="secondary" className="button-list" onClick={() => executePlan(item.plan)}>
                     {item.label}
                   </Button>
                 ))}
@@ -398,20 +466,78 @@ export function App() {
               <div className="subpanel__title">高权限测试（仅手动）</div>
               <div className="list-stack">
                 {PRIVILEGED_ACTIONS.map((item) => (
-                  <Button
-                    key={item.label}
-                    variant="secondary"
-                    className="button-list"
-                    onClick={() => executePlan(item.plan)}
-                  >
+                  <Button key={item.label} variant="secondary" className="button-list" onClick={() => executePlan(item.plan)}>
                     {item.label}
                   </Button>
                 ))}
               </div>
             </section>
+
+            <section className="side-section">
+              <div className="side-section__row">
+                <div className="subpanel__title">窗口列表</div>
+                <Button variant="secondary" size="sm" onClick={refreshWindows} disabled={windowBusy}>
+                  手动刷新
+                </Button>
+              </div>
+              <div className="helper-text">
+                {windowSnapshot.updatedAt ? `上次更新: ${windowSnapshot.updatedAt}` : '尚未加载窗口列表'}
+              </div>
+              <ScrollArea className="window-list">
+                <div className="list-stack">
+                  {windowSnapshot.items.map((item) => (
+                    <WindowListItem key={item.handle} item={item} onOpen={openWindowDetail} />
+                  ))}
+                </div>
+              </ScrollArea>
+            </section>
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen}>
+        <DialogHeader>
+          <DialogTitle>{selectedWindow?.title || '窗口详情'}</DialogTitle>
+          <DialogDescription>查看当前窗口的应用信息与位置，并执行焦点、关闭、移动等已开放接口。</DialogDescription>
+        </DialogHeader>
+
+        <div className="dialog-grid">
+          <section className="subpanel">
+            <div className="subpanel__title">基本信息</div>
+            <pre className="console-block console-block--compact">{formatJson(selectedWindow || {})}</pre>
+          </section>
+
+          <section className="subpanel">
+            <div className="subpanel__title">移动窗口</div>
+            <div className="move-grid">
+              <Input value={windowMoveForm.x} onChange={(event) => setWindowMoveForm((current) => ({ ...current, x: event.target.value }))} placeholder="x" />
+              <Input value={windowMoveForm.y} onChange={(event) => setWindowMoveForm((current) => ({ ...current, y: event.target.value }))} placeholder="y" />
+              <Input
+                value={windowMoveForm.width}
+                onChange={(event) => setWindowMoveForm((current) => ({ ...current, width: event.target.value }))}
+                placeholder="width"
+              />
+              <Input
+                value={windowMoveForm.height}
+                onChange={(event) => setWindowMoveForm((current) => ({ ...current, height: event.target.value }))}
+                placeholder="height"
+              />
+            </div>
+          </section>
+        </div>
+
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => runWindowAction('focus')} disabled={windowBusy}>
+            调起 / 聚焦
+          </Button>
+          <Button variant="secondary" onClick={() => runWindowAction('move')} disabled={windowBusy}>
+            移动窗口
+          </Button>
+          <Button onClick={() => runWindowAction('close')} disabled={windowBusy}>
+            关闭窗口
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   )
 }

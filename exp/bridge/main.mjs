@@ -1,4 +1,5 @@
-import fs from 'node:fs/promises'
+import fs from 'node:fs'
+import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -6,19 +7,67 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 
-import { parseActionsFromTranscript } from './src/commandMatcher.mjs'
+import { parseIntentWithWindows } from './src/intentParser.mjs'
 import { transcribeCommandAudio } from './src/transcribeQwen.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const runtimeRoot = path.join(__dirname, '.runtime')
+const runtimeUserData = path.join(runtimeRoot, 'user-data')
+const runtimeSessionData = path.join(runtimeRoot, 'session-data')
+const runtimeLogs = path.join(runtimeRoot, 'logs')
+
+for (const target of [runtimeRoot, runtimeUserData, runtimeSessionData, runtimeLogs]) {
+  fs.mkdirSync(target, { recursive: true })
+}
+
+// 显式指定可写的本地运行目录，避免 Electron 默认缓存路径权限异常。
+app.setPath('userData', runtimeUserData)
+app.setPath('sessionData', runtimeSessionData)
+app.setPath('logs', runtimeLogs)
 
 dotenv.config({
   path: path.join(__dirname, '.env'),
 })
 
 const windowRegistry = new WindowRegistry()
+
+async function executeBridgePlan(plan) {
+  const results = []
+
+  for (const step of plan || []) {
+    if (step.action === 'focus_window' || step.action === 'close_window') {
+      // 指定窗口动作必须按原顺序执行，否则后续键盘输入会落到错误窗口。
+      const result = await windowRegistry.performWindowAction({
+        action: step.action === 'focus_window' ? 'focus' : 'close',
+        handle: step.args?.handle || step.args?.shortId,
+        processId: step.args?.processId,
+      })
+
+      results.push({
+        scope: 'window',
+        action: step.action,
+        result,
+      })
+      continue
+    }
+
+    const result = await executeActionPlan([step])
+    results.push({
+      scope: 'local',
+      action: step.action,
+      result,
+    })
+  }
+
+  return {
+    ok: true,
+    count: results.length,
+    results,
+  }
+}
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -40,7 +89,7 @@ function createWindow() {
 
 async function saveRecordingToTemp({ bytes, mimeType }) {
   const tempRoot = path.join(os.tmpdir(), 'voice-bridge-recordings')
-  await fs.mkdir(tempRoot, { recursive: true })
+  await fsPromises.mkdir(tempRoot, { recursive: true })
 
   const extension = mimeType?.includes('ogg')
     ? 'ogg'
@@ -51,7 +100,7 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
         : 'webm'
 
   const filePath = path.join(tempRoot, `recording-${Date.now()}.${extension}`)
-  await fs.writeFile(filePath, Buffer.from(bytes))
+  await fsPromises.writeFile(filePath, Buffer.from(bytes))
   return filePath
 }
 
@@ -96,7 +145,8 @@ app.whenReady().then(() => {
       prompt: payload.prompt,
     })
 
-    const matched = parseActionsFromTranscript(analysis.transcript)
+    const windows = await windowRegistry.listWindows()
+    const matched = await parseIntentWithWindows(analysis.transcript, windows.items)
     return {
       ...analysis,
       matched,
@@ -104,11 +154,12 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('bridge:match-transcript', async (_event, transcript) => {
-    return parseActionsFromTranscript(transcript)
+    const windows = await windowRegistry.listWindows()
+    return parseIntentWithWindows(transcript, windows.items)
   })
 
   ipcMain.handle('bridge:execute-plan', async (_event, payload) => {
-    return executeActionPlan(payload.plan)
+    return executeBridgePlan(payload.plan)
   })
 
   ipcMain.handle('bridge:list-windows', async () => {

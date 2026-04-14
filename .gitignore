@@ -44,6 +44,7 @@ jelly-reference*.png
 .playwright-mcp/
 exp/qwen3-omni-flash/speech/*
 exp/bridge/renderer-dist/*
+exp/bridge/.runtime/*
 
 # Database files
 *.db

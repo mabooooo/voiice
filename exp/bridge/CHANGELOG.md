@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.7
+
+- Windows `cmd` 启动时先切换到 UTF-8 代码页 `65001`，缓解终端中中文日志乱码问题。
+- LLM 调试日志现在只打印最终 prompt 与返回 content，不再打印整包请求体。
+- 发给窗口感知意图解析的窗口列表缩减为 `id / appName / title / state`。
+- 优化意图解析 prompt：若应用窗口已存在，用户说“打开 A”时优先理解为聚焦现有 A 窗口，而不是重新启动实例。
+- 避免控制台打印音频 `data:` base64 内容。
+- 新增主进程 LLM 调试日志，终端会打印每次请求的 prompt 与收到的原始 content。
+- 覆盖音频转写请求与窗口感知意图解析请求两类 LLM 调用。
+- Electron 运行时改为使用项目内 `.runtime` 目录承载 `userData / sessionData / logs`。
+- 修复默认缓存目录权限异常导致的 `Unable to create cache / Gpu Cache Creation failed` 问题。
+- 修复 PowerShell 到 Node 的输出编码链路，统一改为 UTF-8 输出并使用 `-EncodedCommand` 传递脚本。
+- 窗口标题、应用名等中文字段不再因控制台代码页不一致而出现乱码。
+- 窗口快照为每个窗口新增简短编号 `W01 / W02 / ...`，并显示在右侧窗口列表中。
+- 指令解析现在会把编号窗口列表一并发给 LLM，用于指定 `focus / close` 某个具体窗口。
+- 新增结构化动作 `focus_window` / `close_window`，执行时携带窗口参数。
+- 桥接执行器改为严格按原动作顺序逐条执行，保证“指定窗口聚焦 -> 输入文本”等组合动作顺序正确。
+
 ## 0.0.6
 
 ### Changed

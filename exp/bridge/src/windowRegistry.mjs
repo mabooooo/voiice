@@ -228,7 +228,11 @@ export class WindowRegistry {
     // 手动刷新时重新抓取系统窗口，避免前端持有过期信息。
     const result = await runPowerShell(buildListWindowsScript())
     const snapshot = await parseJsonOutput(result)
-    this.snapshot = Array.isArray(snapshot) ? snapshot : snapshot ? [snapshot] : []
+    const items = Array.isArray(snapshot) ? snapshot : snapshot ? [snapshot] : []
+    this.snapshot = items.map((item, index) => ({
+      ...item,
+      shortId: `W${String(index + 1).padStart(2, '0')}`,
+    }))
     this.updatedAt = new Date().toISOString()
     return {
       items: this.snapshot,
@@ -249,7 +253,9 @@ export class WindowRegistry {
 
   async getWindowDetail(handle) {
     const snapshot = await this.listWindows()
-    const target = snapshot.items.find((item) => item.handle === String(handle))
+    const target = snapshot.items.find(
+      (item) => item.handle === String(handle) || item.shortId === String(handle),
+    )
     if (!target) {
       throw new Error(`Window not found: ${handle}`)
     }
@@ -267,7 +273,16 @@ export class WindowRegistry {
       throw new Error(`Unsupported window action: ${action}`)
     }
 
-    const result = await runPowerShell(buildWindowActionScript(action, handle, payload?.bounds, payload?.processId))
+    const target = this.snapshot.find(
+      (item) => item.handle === String(handle) || item.shortId === String(handle),
+    )
+
+    const resolvedHandle = target?.handle ?? handle
+    const resolvedProcessId = target?.processId ?? payload?.processId
+
+    const result = await runPowerShell(
+      buildWindowActionScript(action, resolvedHandle, payload?.bounds, resolvedProcessId),
+    )
     const parsed = await parseJsonOutput(result)
     await this.refreshSnapshot()
     return parsed

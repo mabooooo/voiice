@@ -1,14 +1,14 @@
 {
   "name": "voice-bridge-win",
   "private": true,
-  "version": "0.0.8",
+  "version": "0.0.14",
   "description": "Windows Electron bridge for voice-triggered whitelisted desktop actions.",
   "type": "module",
   "main": "main.mjs",
   "scripts": {
     "build:renderer": "vite build --base=./",
-    "start": "npm run build:renderer && electron .",
-    "dev": "npm run build:renderer && electron .",
+    "start": "chcp 65001>nul && npm run build:renderer && electron .",
+    "dev": "chcp 65001>nul && npm run build:renderer && electron .",
     "smoke:matcher": "node ./scripts/smoke-matcher.mjs"
   },
   "dependencies": {

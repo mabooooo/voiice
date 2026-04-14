@@ -43,6 +43,10 @@ function formatActionList(items) {
         return `type_text_to_focused_input(${item.args?.text ?? ''})`
       }
 
+      if (item.action === 'focus_window' || item.action === 'close_window') {
+        return `${item.action}(${item.args?.shortId ?? item.args?.handle ?? ''})`
+      }
+
       return item.action
     })
     .join(', ')
@@ -51,8 +55,11 @@ function formatActionList(items) {
 function WindowListItem({ item, onOpen }) {
   return (
     <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
-      <span className="window-item__title">{item.title}</span>
-      <span className="window-item__meta">{item.appName || 'Unknown App'}</span>
+      <span className="window-item__title">
+        {/* <span className="window-item__short-id">{item.shortId}</span> */}
+        <span>{item.appName || 'Unknown App'} - {item.title}</span>
+      </span>
+      {/* <span className="window-item__meta">{item.appName || 'Unknown App'}</span> */}
       <span className="window-item__meta">
         {item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}
       </span>
@@ -64,7 +71,7 @@ function WindowListItem({ item, onOpen }) {
 export function App() {
   const [configStatus, setConfigStatus] = useState('读取配置中...')
   const [audioPath, setAudioPath] = useState('')
-  const [prompt, setPrompt] = useState('如果语音是OS操作意图，那么请只返回这段语音对应的操作意图文本，不要解释。否则请简短回答用户的提问。')
+  const [prompt, setPrompt] = useState('如果语音表达的是桌面操作意图，请只返回对应的操作意图文本，不要解释；否则请简短回答用户的问题。')
   const [stream, setStream] = useState(false)
   const [autoExecute, setAutoExecute] = useState(false)
   const [transcript, setTranscript] = useState('')

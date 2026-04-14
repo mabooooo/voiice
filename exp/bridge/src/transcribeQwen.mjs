@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 
 import ffmpegPath from 'ffmpeg-static'
 import OpenAI from 'openai'
+import { logLlmPrompt, logLlmResponse } from './llmDebug.mjs'
 
 const DIRECT_AUDIO_FORMATS = new Set(['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'])
 
@@ -105,6 +106,9 @@ export async function transcribeCommandAudio(filePath, options = {}) {
     ],
   }
 
+  // 调试时只打印真正发给模型的提示词，避免输出音频 data URL。
+  logLlmPrompt('transcribeQwen', prompt)
+
   const requestStartedAt = Date.now()
   let transcript = ''
   let usage = null
@@ -146,6 +150,11 @@ export async function transcribeCommandAudio(filePath, options = {}) {
     usage = completion.usage ?? null
     firstTextLatencyMs = Date.now() - requestStartedAt
   }
+
+  logLlmResponse('transcribeQwen', {
+    transcript: transcript.trim(),
+    usage,
+  })
 
   return {
     transcript: transcript.trim(),

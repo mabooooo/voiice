@@ -381,9 +381,26 @@ textarea {
 }
 
 .window-item__title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
   font-size: 0.92rem;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.window-item__short-id {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #3f3f46;
+  background: #18181b;
+  color: #e4e4e7;
+  font-size: 0.74rem;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
 .window-item__meta {

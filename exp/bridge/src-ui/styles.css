@@ -550,6 +550,13 @@ textarea {
   transition: border-color 0.18s ease, background-color 0.18s ease;
 }
 
+.window-item--focused {
+  border-color: #d4d4d8;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent),
+    #141418;
+}
+
 .window-item:hover {
   background: #17171b;
   border-color: #3f3f46;
@@ -576,6 +583,40 @@ textarea {
   color: #e4e4e7;
   font-size: 0.74rem;
   font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.window-item__focus-badge {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f4f5;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.window-focus-summary {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border-radius: calc(var(--radius) - 6px);
+  border: 1px solid #27272a;
+  background: #111114;
+}
+
+.window-focus-summary__label {
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.window-focus-summary__value {
+  color: var(--foreground);
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
 
 .overlay-root {

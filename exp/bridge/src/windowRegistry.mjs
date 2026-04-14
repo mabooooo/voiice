@@ -54,6 +54,8 @@ function buildListWindowsScript() {
   return `
 ${buildWindowApiScript()}
 $items = New-Object System.Collections.Generic.List[object]
+$foregroundWindow = [BridgeWindowApi]::GetForegroundWindow()
+$foregroundHandle = if ($foregroundWindow -eq [IntPtr]::Zero) { "" } else { ([Int64]$foregroundWindow).ToString() }
 
 $callback = [EnumWindowsProc]{
   param($hWnd, $lParam)
@@ -131,7 +133,10 @@ $callback = [EnumWindowsProc]{
 }
 
 [BridgeWindowApi]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
-$items | Sort-Object appName, title | ConvertTo-Json -Depth 5
+[PSCustomObject]@{
+  foregroundHandle = $foregroundHandle
+  items = ($items | Sort-Object appName, title)
+} | ConvertTo-Json -Depth 6
 `
 }
 
@@ -222,20 +227,27 @@ export class WindowRegistry {
   constructor() {
     this.snapshot = []
     this.updatedAt = null
+    this.focusedWindow = null
   }
 
   async refreshSnapshot() {
     // 手动刷新时重新抓取系统窗口，避免前端持有过期信息。
     const result = await runPowerShell(buildListWindowsScript())
     const snapshot = await parseJsonOutput(result)
-    const items = Array.isArray(snapshot) ? snapshot : snapshot ? [snapshot] : []
-    this.snapshot = items.map((item, index) => ({
+    const sourceItems = Array.isArray(snapshot?.items) ? snapshot.items : []
+    const foregroundHandle = String(snapshot?.foregroundHandle || '')
+
+    // 窗口快照里直接标记当前焦点窗口，供 UI 展示和 LLM 上下文共用。
+    this.snapshot = sourceItems.map((item, index) => ({
       ...item,
       shortId: `W${String(index + 1).padStart(2, '0')}`,
+      isFocused: item.handle === foregroundHandle,
     }))
+    this.focusedWindow = this.snapshot.find((item) => item.isFocused) || null
     this.updatedAt = new Date().toISOString()
     return {
       items: this.snapshot,
+      focusedWindow: this.focusedWindow,
       updatedAt: this.updatedAt,
     }
   }
@@ -247,6 +259,7 @@ export class WindowRegistry {
 
     return {
       items: this.snapshot,
+      focusedWindow: this.focusedWindow,
       updatedAt: this.updatedAt,
     }
   }

@@ -5,12 +5,35 @@ import { logLlmPrompt, logLlmRequest, logLlmResponse } from './llmDebug.mjs'
 import { buildProviderBodyExtensions, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
 import { buildAudioDataUrl, prepareAudioForUpload } from './transcribeQwen.mjs'
 
-function buildWindowSummary(windows) {
-  if (!Array.isArray(windows) || windows.length === 0) {
+function normalizeWindowContext(windowContext) {
+  if (Array.isArray(windowContext)) {
+    return {
+      items: windowContext,
+      focusedWindow: windowContext.find((item) => item?.isFocused) || null,
+    }
+  }
+
+  return {
+    items: Array.isArray(windowContext?.items) ? windowContext.items : [],
+    focusedWindow: windowContext?.focusedWindow || null,
+  }
+}
+
+function buildFocusedWindowSummary(focusedWindow) {
+  if (!focusedWindow) {
+    return '未知'
+  }
+
+  return `id=${focusedWindow.shortId} | appName=${focusedWindow.appName || 'unknown'} | title=${focusedWindow.title} | state=${focusedWindow.state || 'unknown'}`
+}
+
+function buildWindowSummary(windowContext) {
+  const { items } = normalizeWindowContext(windowContext)
+  if (items.length === 0) {
     return '无可用窗口'
   }
 
-  return windows
+  return items
     .map((item) => {
       const state = item.state || 'unknown'
       return `id=${item.shortId} | appName=${item.appName || 'unknown'} | title=${item.title} | state=${state}`
@@ -26,8 +49,10 @@ function buildIntentSystemPrompt() {
   ].join('\n')
 }
 
-function buildIntentUserPrompt(transcript, windows) {
-  const windowSummary = buildWindowSummary(windows)
+function buildIntentUserPrompt(transcript, windowContext) {
+  const { focusedWindow } = normalizeWindowContext(windowContext)
+  const focusedWindowSummary = buildFocusedWindowSummary(focusedWindow)
+  const windowSummary = buildWindowSummary(windowContext)
 
   // 这里改成多行模板字符串，后续调整函数说明和规则时更直观。
   return `
@@ -35,6 +60,7 @@ function buildIntentUserPrompt(transcript, windows) {
 ${transcript}
 
 窗口列表：
+当前焦点窗口：${focusedWindowSummary}
 ${windowSummary}
 
 可选函数：
@@ -64,8 +90,10 @@ ${windowSummary}
 `.trim()
 }
 
-function buildAudioIntentUserPrompt(windows) {
-  const windowSummary = buildWindowSummary(windows)
+function buildAudioIntentUserPrompt(windowContext) {
+  const { focusedWindow } = normalizeWindowContext(windowContext)
+  const focusedWindowSummary = buildFocusedWindowSummary(focusedWindow)
+  const windowSummary = buildWindowSummary(windowContext)
 
   // 音频链路与文本链路共用同一套函数说明，只把输入来源换成音频。
   return `
@@ -73,6 +101,7 @@ function buildAudioIntentUserPrompt(windows) {
 音频
 
 窗口列表：
+当前焦点窗口：${focusedWindowSummary}
 ${windowSummary}
 
 可选函数：
@@ -218,6 +247,7 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
   const provider = normalizeProvider(options.provider)
   const { client, config } = createCompatibleClient(provider)
   const bodyExtensions = buildProviderBodyExtensions(provider)
+  const { items } = normalizeWindowContext(windows)
 
   const userPrompt = buildIntentUserPrompt(transcript, windows)
 
@@ -253,13 +283,14 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
   const raw = completion.choices?.[0]?.message?.content?.trim() || ''
   logLlmResponse('parseIntentWithWindows', raw)
 
-  return finalizeIntentResult(raw, transcript, windows, 'llm')
+  return finalizeIntentResult(raw, transcript, items, 'llm')
 }
 
 export async function parseAudioIntentWithWindows(filePath, windows, options = {}) {
   const provider = normalizeProvider(options.provider)
   const { client, config } = createCompatibleClient(provider)
   const bodyExtensions = buildProviderBodyExtensions(provider)
+  const { items } = normalizeWindowContext(windows)
   // 语音链路固定关闭流式，避免分片输出增加状态复杂度。
   const stream = false
   const userPrompt = buildAudioIntentUserPrompt(windows)
@@ -358,7 +389,7 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
   }
 
   return {
-    ...finalizeIntentResult(raw, '', windows, 'llm-audio'),
+    ...finalizeIntentResult(raw, '', items, 'llm-audio'),
     usage,
     timing: {
       stream,

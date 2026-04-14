@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
-import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import { CornerIndicatorPanel } from '@/features/desktop-utilities/CornerIndicatorPanel'
 import { DesktopCapturePanel } from '@/features/desktop-utilities/DesktopCapturePanel'
+import { WindowManagementPanel } from '@/features/window-management/WindowManagementPanel'
 
 // 主控制台页面：负责串起音频输入、动作执行、窗口管理和设置页切换。
 const ACTIVE_MENU = { developer: 'developer', settings: 'settings' }
@@ -115,19 +115,6 @@ function formatActionList(items) {
 }
 
 // 窗口列表中的单项卡片，只负责展示简要信息并打开详情弹窗。
-function WindowListItem({ item, onOpen }) {
-  return (
-    <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
-      <span className="window-item__title">
-        <span className="window-item__short-id">{item.shortId}</span>
-        <span>{item.appName || 'Unknown App'} - {item.title}</span>
-      </span>
-      <span className="window-item__meta">{item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}</span>
-      <span className="window-item__meta">state: {item.state || 'unknown'}</span>
-    </button>
-  )
-}
-
 // 左侧导航仅切换页面上下文，不承载具体业务逻辑。
 function Navigation({ activeMenu, onSelect }) {
   return (
@@ -168,11 +155,6 @@ export function App() {
   const [recorder, setRecorder] = useState(null)
   const [mediaStream, setMediaStream] = useState(null)
   const [recordedChunks, setRecordedChunks] = useState([])
-  const [windowSnapshot, setWindowSnapshot] = useState({ items: [], updatedAt: null })
-  const [selectedWindow, setSelectedWindow] = useState(null)
-  const [windowDialogOpen, setWindowDialogOpen] = useState(false)
-  const [windowMoveForm, setWindowMoveForm] = useState({ x: '', y: '', width: '', height: '' })
-  const [windowBusy, setWindowBusy] = useState(false)
   const [autoAnalyzeAfterStop, setAutoAnalyzeAfterStop] = useState(false)
   const [availableMicrophones, setAvailableMicrophones] = useState([])
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState(() => localStorage.getItem(STORAGE_KEYS.microphoneId) || '')
@@ -264,7 +246,6 @@ export function App() {
       if (state.shortcut) setShortcutDraft(state.shortcut)
     }).catch((error) => appendLog(`读取快捷键配置失败: ${error.message || error}`))
 
-    refreshWindows()
     refreshMicrophoneDevices()
 
     const handleDeviceChange = () => { refreshMicrophoneDevices() }
@@ -293,71 +274,6 @@ export function App() {
   }, [shortcutCaptureActive])
 
   useEffect(() => () => { stopAudioMeter() }, [])
-
-  function syncMoveForm(item) {
-    setWindowMoveForm({
-      x: String(item?.bounds?.x ?? ''),
-      y: String(item?.bounds?.y ?? ''),
-      width: String(item?.bounds?.width ?? ''),
-      height: String(item?.bounds?.height ?? ''),
-    })
-  }
-
-  // 窗口快照完全由主进程维护，前端只在这里拉取最新副本。
-  async function refreshWindows() {
-    try {
-      const snapshot = await window.bridgeApi.refreshWindows()
-      setWindowSnapshot(snapshot)
-      appendLog(`窗口列表已刷新，共 ${snapshot.items.length} 个窗口。`)
-    } catch (error) {
-      appendLog(`刷新窗口列表失败: ${error.message || error}`)
-    }
-  }
-
-  // 详情弹窗进入前先拉一次窗口详情，避免列表数据过旧。
-  async function openWindowDetail(handle) {
-    setWindowBusy(true)
-    try {
-      const detail = await window.bridgeApi.getWindowDetail(handle)
-      setSelectedWindow(detail.item)
-      syncMoveForm(detail.item)
-      setWindowDialogOpen(true)
-    } catch (error) {
-      appendLog(`读取窗口详情失败: ${error.message || error}`)
-    } finally {
-      setWindowBusy(false)
-    }
-  }
-
-  // 窗口动作统一走同一入口，焦点/移动/关闭都复用这条链路。
-  async function runWindowAction(action) {
-    if (!selectedWindow?.handle) return
-    setWindowBusy(true)
-    try {
-      const payload = { action, handle: selectedWindow.handle, processId: selectedWindow.processId }
-      if (action === 'move') {
-        payload.bounds = {
-          x: Number(windowMoveForm.x), y: Number(windowMoveForm.y),
-          width: Number(windowMoveForm.width), height: Number(windowMoveForm.height),
-        }
-      }
-      const result = await window.bridgeApi.windowAction(payload)
-      appendLog(`窗口动作执行完成: ${formatJson(result)}`)
-      await refreshWindows()
-      if (action === 'close') {
-        setWindowDialogOpen(false)
-        setSelectedWindow(null)
-      } else {
-        const detail = await window.bridgeApi.getWindowDetail(selectedWindow.handle)
-        setSelectedWindow(detail.item)
-        syncMoveForm(detail.item)
-      }
-    } catch (error) {
-      appendLog(`窗口动作执行失败: ${error.message || error}`)
-    } finally {
-      setWindowBusy(false)
-    }
-  }
 
   async function pickAudioFile() {
     const filePath = await window.bridgeApi.pickAudioFile()
@@ -801,16 +717,7 @@ export function App() {
               <div className="list-stack">{PRIVILEGED_ACTIONS.map((item) => <Button key={item.label} variant="secondary" className="button-list" onClick={() => executePlan(item.plan)}>{item.label}</Button>)}</div>
             </section>
             <CornerIndicatorPanel onLog={appendLog} />
-            <section className="side-section">
-              <div className="side-section__row">
-                <div className="subpanel__title">窗口列表</div>
-                <Button variant="secondary" size="sm" onClick={refreshWindows} disabled={windowBusy}>手动刷新</Button>
-              </div>
-              <div className="helper-text">{windowSnapshot.updatedAt ? `上次更新: ${windowSnapshot.updatedAt}` : '尚未加载窗口列表'}</div>
-              <ScrollArea className="window-list">
-                <div className="list-stack">{windowSnapshot.items.map((item) => <WindowListItem key={item.handle} item={item} onOpen={openWindowDetail} />)}</div>
-              </ScrollArea>
-            </section>
+            <WindowManagementPanel onLog={appendLog} />
           </CardContent>
         </Card>
       </div>
@@ -825,33 +732,6 @@ export function App() {
           {activeMenu === ACTIVE_MENU.developer ? renderDeveloperPage() : renderSettingsPage()}
         </main>
       </div>
-
-      <Dialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen}>
-        <DialogHeader>
-          <DialogTitle>{selectedWindow?.title || '窗口详情'}</DialogTitle>
-          <DialogDescription>查看当前窗口的应用信息与位置，并执行焦点、关闭、移动等已开放接口。</DialogDescription>
-        </DialogHeader>
-        <div className="dialog-grid">
-          <section className="subpanel">
-            <div className="subpanel__title">基本信息</div>
-            <pre className="console-block console-block--compact">{formatJson(selectedWindow || {})}</pre>
-          </section>
-          <section className="subpanel">
-            <div className="subpanel__title">移动窗口</div>
-            <div className="move-grid">
-              <Input value={windowMoveForm.x} onChange={(event) => setWindowMoveForm((current) => ({ ...current, x: event.target.value }))} placeholder="x" />
-              <Input value={windowMoveForm.y} onChange={(event) => setWindowMoveForm((current) => ({ ...current, y: event.target.value }))} placeholder="y" />
-              <Input value={windowMoveForm.width} onChange={(event) => setWindowMoveForm((current) => ({ ...current, width: event.target.value }))} placeholder="width" />
-              <Input value={windowMoveForm.height} onChange={(event) => setWindowMoveForm((current) => ({ ...current, height: event.target.value }))} placeholder="height" />
-            </div>
-          </section>
-        </div>
-        <DialogFooter>
-          <Button variant="secondary" onClick={() => runWindowAction('focus')} disabled={windowBusy}>调起 / 聚焦</Button>
-          <Button variant="secondary" onClick={() => runWindowAction('move')} disabled={windowBusy}>移动窗口</Button>
-          <Button onClick={() => runWindowAction('close')} disabled={windowBusy}>关闭窗口</Button>
-        </DialogFooter>
-      </Dialog>
     </div>
   )
 }

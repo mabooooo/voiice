@@ -1,4 +1,17 @@
 # Changelog
+## 0.0.14 当前焦点窗口接入与窗口管理组件拆分
+
+### Added
+
+- 窗口快照新增当前焦点窗口识别，主进程会返回 `focusedWindow` 并在窗口项上标记 `isFocused`。
+- LLM 上下文新增“当前焦点窗口”简要描述，并与窗口列表一起发给模型，帮助模型理解当前前台状态。
+- 窗口管理面板新增“当前焦点窗口”展示，并在列表中高亮当前焦点窗口。
+
+### Changed
+
+- 右侧窗口管理能力从 `App.jsx` 中拆出，收敛为独立组件 `src-ui/features/window-management/WindowManagementPanel.jsx`，便于后续维护和扩展。
+- 窗口详情、窗口移动和窗口动作执行逻辑改为由独立窗口管理组件内聚处理，减少主页面职责混杂。
+
 ## 0.0.13 Xiaomi thinking 配置补齐
 
 ### Changed

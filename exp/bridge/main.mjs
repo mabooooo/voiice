@@ -406,7 +406,7 @@ app.whenReady().then(async () => {
     const provider = normalizeProvider(payload?.provider)
     // 每次发送语音前都强制刷新窗口快照，确保传给 LLM 的是最新前台状态。
     const windows = await windowRegistry.refreshSnapshot()
-    const matched = await parseAudioIntentWithWindows(payload.filePath, windows.items, { provider })
+    const matched = await parseAudioIntentWithWindows(payload.filePath, windows, { provider })
 
     return {
       transcript: matched.stt || '',
@@ -429,7 +429,7 @@ app.whenReady().then(async () => {
     const provider = normalizeProvider(payload?.provider)
     // 手动文本指令也复用最新窗口快照，避免和语音链路行为不一致。
     const windows = await windowRegistry.refreshSnapshot()
-    return parseIntentWithWindows(transcript, windows.items, { provider })
+    return parseIntentWithWindows(transcript, windows, { provider })
   })
 
   ipcMain.handle('bridge:execute-plan', async (_event, payload) => {

@@ -38,6 +38,8 @@ const windowRegistry = new WindowRegistry()
 let mainWindow = null
 let overlayWindow = null
 let overlayResetTimer = null
+let indicatorWindows = []
+let indicatorResetTimer = null
 let recordingByShortcut = false
 const shortcutManager = new GlobalShortcutManager({
   configPath: path.join(runtimeRoot, 'shortcut-config.json'),
@@ -59,6 +61,126 @@ const OVERLAY_DEFAULT_SIZE = {
   height: 62,
 }
 const OVERLAY_MARGIN_BOTTOM = 28
+const CORNER_INDICATOR_SIZE = 300
+const CORNER_INDICATOR_DURATION_MS = 3000
+const CORNER_INDICATOR_BORDER = 8
+
+function disposeIndicatorWindows() {
+  if (indicatorResetTimer) {
+    clearTimeout(indicatorResetTimer)
+    indicatorResetTimer = null
+  }
+
+  for (const win of indicatorWindows) {
+    if (!win.isDestroyed()) win.destroy()
+  }
+  indicatorWindows = []
+}
+
+function buildIndicatorRects(display) {
+  const size = CORNER_INDICATOR_SIZE
+  const centers = {
+    left: Math.round(display.bounds.width * 0.25),
+    right: Math.round(display.bounds.width * 0.75),
+    top: Math.round(display.bounds.height * 0.25),
+    bottom: Math.round(display.bounds.height * 0.75),
+  }
+
+  return [
+    { left: centers.left - size / 2, top: centers.top - size / 2 },
+    { left: centers.right - size / 2, top: centers.top - size / 2 },
+    { left: centers.left - size / 2, top: centers.bottom - size / 2 },
+    { left: centers.right - size / 2, top: centers.bottom - size / 2 },
+  ].map(item => ({
+    left: Math.round(item.left),
+    top: Math.round(item.top),
+    size,
+  }))
+}
+
+function buildIndicatorHtml(display) {
+  const rects = buildIndicatorRects(display)
+  const squares = rects.map((rect) => {
+    return `<div class="indicator" style="left:${rect.left}px;top:${rect.top}px;width:${rect.size}px;height:${rect.size}px;"></div>`
+  }).join('')
+
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .indicator {
+        position: absolute;
+        box-sizing: border-box;
+        border: ${CORNER_INDICATOR_BORDER}px solid #facc15;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    ${squares}
+  </body>
+</html>`
+}
+
+async function showCornerIndicators() {
+  disposeIndicatorWindows()
+  const displays = screen.getAllDisplays()
+  const windows = displays.map((display) => {
+    const indicatorWindow = new BrowserWindow({
+      ...display.bounds,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      resizable: false,
+      movable: false,
+      focusable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      hasShadow: false,
+      show: false,
+    })
+
+    indicatorWindow.setIgnoreMouseEvents(true)
+    indicatorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    return {
+      display,
+      window: indicatorWindow,
+    }
+  })
+
+  // 每块屏幕只保留一个透明层窗口，内部绘制四个框，减少窗口数量与合成开销。
+  await Promise.all(windows.map(async ({ display, window }) => {
+    const html = buildIndicatorHtml(display)
+    await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`)
+  }))
+
+  for (const item of windows) {
+    item.window.showInactive()
+  }
+
+  indicatorWindows = windows.map(item => item.window)
+  indicatorResetTimer = setTimeout(() => {
+    disposeIndicatorWindows()
+  }, CORNER_INDICATOR_DURATION_MS)
+
+  return {
+    ok: true,
+    displayCount: displays.length,
+    indicatorCount: displays.length * 4,
+    overlayWindowCount: windows.length,
+    durationMs: CORNER_INDICATOR_DURATION_MS,
+    size: CORNER_INDICATOR_SIZE,
+  }
+}
 
 function computeOverlayBounds(width, height) {
   const display = screen.getPrimaryDisplay()
@@ -274,6 +396,10 @@ app.whenReady().then(async () => {
     })
   })
 
+  ipcMain.handle('bridge:show-corner-indicators', async () => {
+    return showCornerIndicators()
+  })
+
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {
     // 每次发送语音前都强制刷新窗口快照，确保传给 LLM 的是最新前台状态。
     const windows = await windowRegistry.refreshSnapshot()
@@ -366,5 +492,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  disposeIndicatorWindows()
   shortcutManager.stop()
 })

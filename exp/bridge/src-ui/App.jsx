@@ -7,7 +7,10 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { CornerIndicatorPanel } from '@/features/desktop-utilities/CornerIndicatorPanel'
+import { DesktopCapturePanel } from '@/features/desktop-utilities/DesktopCapturePanel'
 
+// 主控制台页面：负责串起音频输入、动作执行、窗口管理和设置页切换。
 const ACTIVE_MENU = { developer: 'developer', settings: 'settings' }
 const STORAGE_KEYS = {
   activeMenu: 'voice-bridge-active-menu',
@@ -34,6 +37,19 @@ const PRIVILEGED_ACTIONS = [
 ]
 
 function formatJson(value) { return JSON.stringify(value, null, 2) }
+function buildAudioConstraints(deviceId) {
+  const constraints = {
+    autoGainControl: false,
+    noiseSuppression: false,
+    echoCancellation: false,
+    channelCount: 1,
+  }
+  if (deviceId) constraints.deviceId = { exact: deviceId }
+  return constraints
+}
+function isHeadsetMicrophoneLabel(label) {
+  return /headset|hands-free|bluetooth|耳机|耳麦|蓝牙/i.test(label || '')
+}
 function getPrimaryShortcutLabel(code) {
   if (!code) return '未设置'
   if (SPECIAL_SHORTCUT_LABELS[code]) return SPECIAL_SHORTCUT_LABELS[code]
@@ -94,6 +110,7 @@ function formatActionList(items) {
     }).join(', ')
 }
 
+// 窗口列表中的单项卡片，只负责展示简要信息并打开详情弹窗。
 function WindowListItem({ item, onOpen }) {
   return (
     <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
@@ -107,6 +124,7 @@ function WindowListItem({ item, onOpen }) {
   )
 }
 
+// 左侧导航仅切换页面上下文，不承载具体业务逻辑。
 function Navigation({ activeMenu, onSelect }) {
   return (
     <aside className="nav-rail">
@@ -186,6 +204,7 @@ export function App() {
   useEffect(() => { autoAnalyzeAfterStopRef.current = autoAnalyzeAfterStop }, [autoAnalyzeAfterStop])
   useEffect(() => { shortcutStateRef.current = shortcutState }, [shortcutState])
 
+  // 所有异步动作统一写入顶部日志，便于追踪当前实验链路。
   function appendLog(message) {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     setLogs((current) => [`[${time}] ${message}`, ...current].slice(0, 80))
@@ -196,6 +215,12 @@ export function App() {
     setSelectedInputDeviceId(nextDeviceId)
   }
 
+  function getSelectedMicrophoneLabel(deviceId) {
+    if (!deviceId) return '系统默认输入设备'
+    return availableMicrophonesRef.current.find(item => item.deviceId === deviceId)?.label || '已选设备'
+  }
+
+  // 刷新输入设备时优先保留显式选择，避免录音过程中切回别的麦克风。
   async function refreshMicrophoneDevices(preferredDeviceId) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices()
@@ -211,9 +236,8 @@ export function App() {
         updateSelectedInputDeviceId(desiredDeviceId)
         return
       }
-      if (!desiredDeviceId) {
-        updateSelectedInputDeviceId(inputs[0].deviceId)
-      }
+      // 未显式选择设备时保持“系统默认输入设备”，避免应用误锁定到耳机麦并触发声卡模式切换。
+      updateSelectedInputDeviceId('')
     } catch (error) {
       appendLog(`读取麦克风列表失败: ${error.message || error}`)
     }
@@ -272,6 +296,7 @@ export function App() {
     })
   }
 
+  // 窗口快照完全由主进程维护，前端只在这里拉取最新副本。
   async function refreshWindows() {
     try {
       const snapshot = await window.bridgeApi.refreshWindows()
@@ -282,6 +307,7 @@ export function App() {
     }
   }
 
+  // 详情弹窗进入前先拉一次窗口详情，避免列表数据过旧。
   async function openWindowDetail(handle) {
     setWindowBusy(true)
     try {
@@ -296,6 +322,7 @@ export function App() {
     }
   }
 
+  // 窗口动作统一走同一入口，焦点/移动/关闭都复用这条链路。
   async function runWindowAction(action) {
     if (!selectedWindow?.handle) return
     setWindowBusy(true)
@@ -332,6 +359,7 @@ export function App() {
     appendLog(`已选择音频文件: ${filePath}`)
   }
 
+  // 设置页里录入快捷键时，直接用浏览器键盘事件构造候选值。
   function handleShortcutFieldKeyDown(event) {
     event.preventDefault()
     event.stopPropagation()
@@ -360,6 +388,7 @@ export function App() {
     }
   }
 
+  // 音频分析是录音和文件导入的公共收口，避免两条状态机分叉。
   async function analyzeAudioFile(filePath) {
     if (!filePath) {
       appendLog('请先选择音频文件，或者先录音。')
@@ -404,6 +433,7 @@ export function App() {
 
   async function analyzeAudio() { return analyzeAudioFile(audioPath) }
 
+  // 音量计只负责给 overlay 提供轻量级实时反馈，不参与录音结果本身。
   function stopAudioMeter() {
     if (meterFrameRef.current) {
       cancelAnimationFrame(meterFrameRef.current)
@@ -420,6 +450,7 @@ export function App() {
     }
   }
 
+  // 录音中的可视化反馈通过 AnalyserNode 采样，节流后再推送给主进程。
   function startAudioMeter(nextStream, subtitle) {
     stopAudioMeter()
     const AudioContextClass = window.AudioContext || window.webkitAudioContext
@@ -452,6 +483,7 @@ export function App() {
     meterFrameRef.current = requestAnimationFrame(tick)
   }
 
+  // 白名单动作执行统一从这里出发，便于保持日志和 overlay 展示一致。
   async function executePlan(nextPlan, options = {}) {
     if (!nextPlan || nextPlan.length === 0) {
       appendLog('当前没有可执行的动作。')
@@ -475,6 +507,7 @@ export function App() {
     }
   }
 
+  // 手动文本指令只做“文本 -> plan”的调试入口，不走音频链路。
   async function parseAndExecuteManualCommand() {
     if (!manualCommand.trim()) {
       appendLog('请先输入文本指令。')
@@ -493,18 +526,25 @@ export function App() {
     }
   }
 
+  // 录音启动时同时初始化浏览器录制器、音量计和停止后的自动分析逻辑。
   async function startRecording(triggeredByShortcut = false) {
     try {
       if (recorderRef.current && recorderRef.current.state === 'recording') return
       const currentDeviceId = selectedInputDeviceIdRef.current
-      const currentMicrophones = availableMicrophonesRef.current
-      const audioConstraint = currentDeviceId ? { deviceId: { exact: currentDeviceId } } : true
-      const streamRef = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint })
+      const currentMicrophoneLabel = getSelectedMicrophoneLabel(currentDeviceId)
+      const streamRef = await navigator.mediaDevices.getUserMedia({
+        // 录音约束尽量保持原始输入，减少浏览器自动增益对耳机音量和音色的二次干预。
+        audio: buildAudioConstraints(currentDeviceId),
+      })
       refreshMicrophoneDevices(currentDeviceId)
 
       const chunks = []
       const mediaRecorder = new MediaRecorder(streamRef)
       const listeningSubtitle = triggeredByShortcut ? `再次按 ${shortcutStateRef.current.shortcutLabel || '快捷键'} 停止` : '正在监听语音...'
+
+      if (isHeadsetMicrophoneLabel(currentMicrophoneLabel)) {
+        appendLog(`当前使用的输入设备看起来是耳机麦克风：${currentMicrophoneLabel}。如果听歌时音量异常，建议改成系统默认或外置麦克风。`)
+      }
 
       mediaRecorder.addEventListener('dataavailable', (event) => {
         if (event.data && event.data.size > 0) chunks.push(event.data)
@@ -539,7 +579,7 @@ export function App() {
       setMediaStream(streamRef)
       setRecorder(mediaRecorder)
       setRecordingState(currentDeviceId
-        ? `录音中... 输入设备：${currentMicrophones.find((item) => item.deviceId === currentDeviceId)?.label || '已选设备'}`
+        ? `录音中... 输入设备：${currentMicrophoneLabel}`
         : '录音中...')
       startAudioMeter(streamRef, listeningSubtitle)
       mediaRecorder.start()
@@ -553,6 +593,7 @@ export function App() {
     }
   }
 
+  // 停止录音只负责收尾与落盘，真正的识别在 stop 回调后继续执行。
   function stopRecording(triggeredByShortcut = false, runtime = {}) {
     const activeRecorder = runtime.recorder || recorderRef.current
     const activeMediaStream = runtime.mediaStream || mediaStreamRef.current
@@ -567,6 +608,7 @@ export function App() {
     window.bridgeApi.notifyOverlayState({ status: 'waiting', title: 'Brewing...', subtitle: '=.=', level: 0 })
   }
 
+  // 设置页承载环境级配置，例如全局快捷键与输入设备。
   function renderSettingsPage() {
     return (
       <div className="settings-layout">
@@ -625,12 +667,16 @@ export function App() {
             <div className="helper-text">
               当前选择：{availableMicrophones.find((item) => item.deviceId === selectedInputDeviceId)?.label || '系统默认输入设备'}
             </div>
+            <div className="helper-text">
+              带麦耳机在录音时可能切到通话模式并改变播放音量。若出现异常，优先保持“系统默认输入设备”或改用外置麦克风。
+            </div>
           </CardContent>
         </Card>
       </div>
     )
   }
 
+  // 开发者页聚合主要实验链路：输入、分析、桌面工具和右侧手动操作区。
   function renderDeveloperPage() {
     return (
       <div className="developer-layout">
@@ -700,6 +746,7 @@ export function App() {
                   <section className="subpanel"><div className="subpanel__title">Timing</div><pre className="console-block console-block--compact">{formatJson(timing)}</pre></section>
                   <section className="subpanel"><div className="subpanel__title">Usage</div><pre className="console-block console-block--compact">{formatJson(usage)}</pre></section>
                 </div>
+                <DesktopCapturePanel onLog={appendLog} />
                 <section className="subpanel">
                   <div className="subpanel__title">Execution Log</div>
                   <ScrollArea className="subpanel__body subpanel__body--log"><pre className="console-block">{logs.join('\n')}</pre></ScrollArea>
@@ -734,6 +781,7 @@ export function App() {
               <div className="subpanel__title">高权限测试（仅手动）</div>
               <div className="list-stack">{PRIVILEGED_ACTIONS.map((item) => <Button key={item.label} variant="secondary" className="button-list" onClick={() => executePlan(item.plan)}>{item.label}</Button>)}</div>
             </section>
+            <CornerIndicatorPanel onLog={appendLog} />
             <section className="side-section">
               <div className="side-section__row">
                 <div className="subpanel__title">窗口列表</div>

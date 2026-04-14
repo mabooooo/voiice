@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,27 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+
+const SPECIAL_SHORTCUT_LABELS = {
+  AltLeft: '左 Alt',
+  AltRight: '右 Alt',
+  ShiftLeft: '左 Shift',
+  ShiftRight: '右 Shift',
+  ControlLeft: '左 Ctrl',
+  ControlRight: '右 Ctrl',
+  MetaLeft: '左 Win',
+  MetaRight: '右 Win',
+  Space: 'Space',
+  Enter: 'Enter',
+  Escape: 'Esc',
+  Tab: 'Tab',
+  Backspace: 'Backspace',
+  Delete: 'Delete',
+  ArrowUp: '↑',
+  ArrowDown: '↓',
+  ArrowLeft: '←',
+  ArrowRight: '→',
+}
 
 const MANUAL_ACTIONS = [
   { label: 'focus_front_window', plan: [{ action: 'focus_front_window' }] },
@@ -22,6 +43,101 @@ const PRIVILEGED_ACTIONS = [
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2)
+}
+
+function getPrimaryShortcutLabel(code) {
+  if (!code) {
+    return '未设置'
+  }
+
+  if (SPECIAL_SHORTCUT_LABELS[code]) {
+    return SPECIAL_SHORTCUT_LABELS[code]
+  }
+
+  if (code.startsWith('Key')) {
+    return code.slice(3).toUpperCase()
+  }
+
+  if (code.startsWith('Digit')) {
+    return code.slice(5)
+  }
+
+  return code
+}
+
+function normalizeShortcutModifiers(code, modifiers) {
+  const normalized = {
+    alt: Boolean(modifiers?.alt),
+    ctrl: Boolean(modifiers?.ctrl),
+    shift: Boolean(modifiers?.shift),
+    meta: Boolean(modifiers?.meta),
+  }
+
+  if (code?.startsWith('Alt')) {
+    normalized.alt = false
+  }
+  if (code?.startsWith('Control')) {
+    normalized.ctrl = false
+  }
+  if (code?.startsWith('Shift')) {
+    normalized.shift = false
+  }
+  if (code?.startsWith('Meta')) {
+    normalized.meta = false
+  }
+
+  return normalized
+}
+
+function buildShortcutLabel(candidate) {
+  if (!candidate?.code) {
+    return '未设置'
+  }
+
+  const modifiers = normalizeShortcutModifiers(candidate.code, candidate.modifiers)
+  const tokens = []
+
+  if (modifiers.ctrl) {
+    tokens.push('Ctrl')
+  }
+  if (modifiers.shift) {
+    tokens.push('Shift')
+  }
+  if (modifiers.alt) {
+    tokens.push('Alt')
+  }
+  if (modifiers.meta) {
+    tokens.push('Win')
+  }
+
+  tokens.push(getPrimaryShortcutLabel(candidate.code))
+  return tokens.join(' + ')
+}
+
+function buildShortcutCandidate(event) {
+  const code = event.code || ''
+  if (!code) {
+    return null
+  }
+
+  return {
+    code,
+    modifiers: normalizeShortcutModifiers(code, {
+      alt: event.altKey,
+      ctrl: event.ctrlKey,
+      shift: event.shiftKey,
+      meta: event.metaKey,
+    }),
+    label: buildShortcutLabel({
+      code,
+      modifiers: {
+        alt: event.altKey,
+        ctrl: event.ctrlKey,
+        shift: event.shiftKey,
+        meta: event.metaKey,
+      },
+    }),
+  }
 }
 
 function formatActionList(items) {
@@ -56,10 +172,9 @@ function WindowListItem({ item, onOpen }) {
   return (
     <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
       <span className="window-item__title">
-        {/* <span className="window-item__short-id">{item.shortId}</span> */}
+        <span className="window-item__short-id">{item.shortId}</span>
         <span>{item.appName || 'Unknown App'} - {item.title}</span>
       </span>
-      {/* <span className="window-item__meta">{item.appName || 'Unknown App'}</span> */}
       <span className="window-item__meta">
         {item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}
       </span>
@@ -73,7 +188,6 @@ export function App() {
   const [audioPath, setAudioPath] = useState('')
   const [prompt, setPrompt] = useState('如果语音表达的是桌面操作意图，请只返回对应的操作意图文本，不要解释；否则请简短回答用户的问题。')
   const [stream, setStream] = useState(false)
-  const [autoExecute, setAutoExecute] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
   const [timing, setTiming] = useState({})
@@ -91,9 +205,60 @@ export function App() {
   const [windowDialogOpen, setWindowDialogOpen] = useState(false)
   const [windowMoveForm, setWindowMoveForm] = useState({ x: '', y: '', width: '', height: '' })
   const [windowBusy, setWindowBusy] = useState(false)
+  const [autoAnalyzeAfterStop, setAutoAnalyzeAfterStop] = useState(false)
+  const [shortcutState, setShortcutState] = useState({
+    provider: 'uiohook-napi',
+    enabled: false,
+    error: '',
+    shortcut: null,
+    shortcutLabel: '右 Alt',
+    lastDetectedLabel: '',
+    lastTriggeredAt: '',
+  })
+  const [shortcutDraft, setShortcutDraft] = useState({
+    code: 'AltRight',
+    modifiers: { alt: false, ctrl: false, shift: false, meta: false },
+    label: '右 Alt',
+  })
+  const [shortcutCaptureActive, setShortcutCaptureActive] = useState(false)
+  const [shortcutHint, setShortcutHint] = useState('点击下方输入框后，按下希望用于开始/停止录音的按键。')
+  const recorderRef = useRef(null)
+  const mediaStreamRef = useRef(null)
+  const autoAnalyzeAfterStopRef = useRef(false)
+  const shortcutStateRef = useRef({
+    provider: 'uiohook-napi',
+    enabled: false,
+    error: '',
+    shortcut: null,
+    shortcutLabel: '右 Alt',
+    lastDetectedLabel: '',
+    lastTriggeredAt: '',
+  })
+  const meterContextRef = useRef(null)
+  const meterAnalyserRef = useRef(null)
+  const meterFrameRef = useRef(0)
+  const meterSourceRef = useRef(null)
+  const meterDataRef = useRef(null)
+  const meterLastPushRef = useRef(0)
 
   const canExecutePlan = plan.length > 0
   const renderedPlan = useMemo(() => formatJson(plan), [plan])
+
+  useEffect(() => {
+    recorderRef.current = recorder
+  }, [recorder])
+
+  useEffect(() => {
+    mediaStreamRef.current = mediaStream
+  }, [mediaStream])
+
+  useEffect(() => {
+    autoAnalyzeAfterStopRef.current = autoAnalyzeAfterStop
+  }, [autoAnalyzeAfterStop])
+
+  useEffect(() => {
+    shortcutStateRef.current = shortcutState
+  }, [shortcutState])
 
   function appendLog(message) {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -104,10 +269,67 @@ export function App() {
     // 初始化读取运行状态，并抓取一份窗口快照作为默认展示。
     window.bridgeApi
       .getConfigStatus()
-      .then((status) => setConfigStatus(formatJson(status)))
+      .then((status) => {
+        setConfigStatus(formatJson(status))
+        if (status.shortcut) {
+          setShortcutState(status.shortcut)
+          if (status.shortcut.shortcut) {
+            setShortcutDraft(status.shortcut.shortcut)
+          }
+        }
+      })
       .catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
 
+    window.bridgeApi
+      .getShortcutState()
+      .then((state) => {
+        setShortcutState(state)
+        if (state.shortcut) {
+          setShortcutDraft(state.shortcut)
+        }
+      })
+      .catch((error) => appendLog(`读取快捷键配置失败: ${error.message || error}`))
+
     refreshWindows()
+
+    const unsubscribeToggle = window.bridgeApi.onRecordingToggle(async ({ recording, shortcutLabel }) => {
+      appendLog(`${shortcutLabel || '全局快捷键'}已触发，${recording ? '开始录音' : '停止录音'}。`)
+      if (recording) {
+        await startRecording(true)
+      } else {
+        stopRecording(true, {
+          recorder: recorderRef.current,
+          mediaStream: mediaStreamRef.current,
+          shortcutLabel: shortcutLabel || shortcutStateRef.current.shortcutLabel,
+        })
+      }
+    })
+
+    const unsubscribeShortcutState = window.bridgeApi.onShortcutState((state) => {
+      setShortcutState(state)
+    })
+
+    return () => {
+      unsubscribeToggle()
+      unsubscribeShortcutState()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!shortcutCaptureActive) {
+      return undefined
+    }
+
+    // 捕获模式下直接监听整页按键，避免修饰键因焦点切换而丢失。
+    const handler = (event) => handleShortcutFieldKeyDown(event)
+    window.addEventListener('keydown', handler, true)
+    return () => window.removeEventListener('keydown', handler, true)
+  }, [shortcutCaptureActive, shortcutDraft])
+
+  useEffect(() => {
+    return () => {
+      stopAudioMeter()
+    }
   }, [])
 
   function syncMoveForm(item) {
@@ -194,18 +416,55 @@ export function App() {
     appendLog(`已选择音频文件: ${filePath}`)
   }
 
-  async function analyzeAudio() {
-    if (!audioPath) {
+  function handleShortcutFieldKeyDown(event) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    // 设置面板直接读取浏览器键盘事件，给用户即时看到“识别到的是哪一个键”。
+    const nextCandidate = buildShortcutCandidate(event)
+    if (!nextCandidate) {
+      setShortcutHint('未识别到有效按键，请重试。')
+      return
+    }
+
+    setShortcutDraft(nextCandidate)
+    setShortcutCaptureActive(false)
+    setShortcutHint(`已识别按键：${nextCandidate.label}，保存后会立即切换到新的全局录音键。`)
+  }
+
+  async function saveShortcutDraft() {
+    try {
+      const state = await window.bridgeApi.updateShortcut(shortcutDraft)
+      setShortcutState(state)
+      setShortcutDraft(state.shortcut)
+      setShortcutHint(`快捷键已更新：${state.shortcutLabel}。`)
+      appendLog(`录音快捷键已切换为 ${state.shortcutLabel}。`)
+    } catch (error) {
+      const message = String(error.message || error)
+      setShortcutHint(`保存失败：${message}`)
+      appendLog(`更新录音快捷键失败: ${message}`)
+    }
+  }
+
+  async function analyzeAudioFile(filePath) {
+    if (!filePath) {
       appendLog('请先选择音频文件，或者先录音。')
       return
     }
 
+    // 文件分析与录音后自动分析都走同一条链路，避免两份状态机分叉。
     setBusy(true)
-    appendLog(`开始分析音频: ${audioPath}`)
+    setAudioPath(filePath)
+    appendLog(`开始分析音频: ${filePath}`)
+    window.bridgeApi.notifyOverlayState({
+      status: 'waiting',
+      title: '识别中',
+      subtitle: '等待服务器返回...',
+    })
 
     try {
       const result = await window.bridgeApi.analyzeAudio({
-        filePath: audioPath,
+        filePath,
         stream,
         prompt: prompt.trim(),
       })
@@ -218,14 +477,99 @@ export function App() {
         `转写完成，匹配到 ${(result.matched?.plan || []).length} 个白名单动作：${formatActionList(result.matched?.plan || [])}`,
       )
 
-      if (autoExecute && (result.matched?.plan || []).length > 0) {
+      if ((result.matched?.plan || []).length > 0) {
         await executePlan(result.matched.plan)
+      } else {
+        window.bridgeApi.notifyOverlayState({
+          status: 'executing',
+          title: '已返回',
+          subtitle: result.transcript || '未匹配到动作',
+          autoResetMs: 4000,
+        })
       }
     } catch (error) {
       appendLog(`分析失败: ${error.message || error}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing',
+        title: '执行失败',
+        subtitle: String(error.message || error),
+        autoResetMs: 4000,
+      })
     } finally {
       setBusy(false)
     }
+  }
+
+  async function analyzeAudio() {
+    return analyzeAudioFile(audioPath)
+  }
+
+  function stopAudioMeter() {
+    if (meterFrameRef.current) {
+      cancelAnimationFrame(meterFrameRef.current)
+      meterFrameRef.current = 0
+    }
+
+    try {
+      meterSourceRef.current?.disconnect()
+    } catch {}
+    meterSourceRef.current = null
+    meterAnalyserRef.current = null
+    meterDataRef.current = null
+    meterLastPushRef.current = 0
+
+    if (meterContextRef.current) {
+      meterContextRef.current.close().catch(() => {})
+      meterContextRef.current = null
+    }
+  }
+
+  function startAudioMeter(nextStream, subtitle) {
+    stopAudioMeter()
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextClass) {
+      return
+    }
+
+    const audioContext = new AudioContextClass()
+    const analyser = audioContext.createAnalyser()
+    analyser.fftSize = 128
+    analyser.smoothingTimeConstant = 0.78
+
+    const source = audioContext.createMediaStreamSource(nextStream)
+    source.connect(analyser)
+
+    meterContextRef.current = audioContext
+    meterAnalyserRef.current = analyser
+    meterSourceRef.current = source
+    meterDataRef.current = new Uint8Array(analyser.frequencyBinCount)
+
+    const tick = () => {
+      if (!meterAnalyserRef.current || !meterDataRef.current) {
+        return
+      }
+
+      meterAnalyserRef.current.getByteFrequencyData(meterDataRef.current)
+      const total = meterDataRef.current.reduce((sum, value) => sum + value, 0)
+      const level = Math.min(1, total / (meterDataRef.current.length * 160))
+      const now = performance.now()
+
+      // 音量反馈只做轻量节流，避免录音时向主进程推送过高频率的 IPC。
+      if (now - meterLastPushRef.current >= 80) {
+        meterLastPushRef.current = now
+        window.bridgeApi.notifyOverlayState({
+          status: 'listening',
+          title: '录音中',
+          subtitle,
+          level,
+        })
+      }
+
+      meterFrameRef.current = requestAnimationFrame(tick)
+    }
+
+    meterFrameRef.current = requestAnimationFrame(tick)
   }
 
   async function executePlan(nextPlan) {
@@ -238,8 +582,20 @@ export function App() {
     try {
       const result = await window.bridgeApi.executePlan({ plan: nextPlan })
       appendLog(`执行完成: ${formatJson(result)}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing',
+        title: '已执行',
+        subtitle: formatActionList(nextPlan),
+        autoResetMs: 4000,
+      })
     } catch (error) {
       appendLog(`执行失败: ${error.message || error}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing',
+        title: '执行失败',
+        subtitle: String(error.message || error),
+        autoResetMs: 4000,
+      })
     }
   }
 
@@ -264,11 +620,18 @@ export function App() {
     }
   }
 
-  async function startRecording() {
+  async function startRecording(triggeredByShortcut = false) {
     try {
+      if (recorderRef.current && recorderRef.current.state === 'recording') {
+        return
+      }
+
       const streamRef = await navigator.mediaDevices.getUserMedia({ audio: true })
       const chunks = []
       const mediaRecorder = new MediaRecorder(streamRef)
+      const listeningSubtitle = triggeredByShortcut
+        ? `再次按 ${shortcutStateRef.current.shortcutLabel || '快捷键'} 停止`
+        : '正在监听语音...'
 
       mediaRecorder.addEventListener('dataavailable', (event) => {
         if (event.data && event.data.size > 0) {
@@ -288,39 +651,77 @@ export function App() {
         setAudioPath(tempPath)
         setRecordingState(`已导入录音: ${tempPath}`)
         appendLog(`录音已保存到临时文件: ${tempPath}`)
+        stopAudioMeter()
         streamRef.getTracks().forEach((track) => track.stop())
         setMediaStream(null)
         setRecorder(null)
         setRecordedChunks([])
+        window.bridgeApi.notifyOverlayState({
+          status: 'waiting',
+          title: '识别中',
+          subtitle: '等待服务器返回...',
+        })
+
+        if (autoAnalyzeAfterStopRef.current || triggeredByShortcut) {
+          setAutoAnalyzeAfterStop(false)
+          autoAnalyzeAfterStopRef.current = false
+          setTimeout(() => {
+            analyzeAudioFile(tempPath)
+          }, 10)
+        }
       })
 
       setRecordedChunks(chunks)
       setMediaStream(streamRef)
       setRecorder(mediaRecorder)
       setRecordingState('录音中...')
+      startAudioMeter(streamRef, listeningSubtitle)
       mediaRecorder.start()
       appendLog('已开始录音。')
+      window.bridgeApi.notifyOverlayState({
+        status: 'listening',
+        title: '录音中',
+        subtitle: listeningSubtitle,
+        level: 0,
+      })
     } catch (error) {
       appendLog(`录音失败: ${error.message || error}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing',
+        title: '录音失败',
+        subtitle: String(error.message || error),
+        autoResetMs: 4000,
+      })
     }
   }
 
-  function stopRecording() {
-    if (!recorder || recorder.state !== 'recording') {
+  function stopRecording(triggeredByShortcut = false, runtime = {}) {
+    const activeRecorder = runtime.recorder || recorderRef.current
+    const activeMediaStream = runtime.mediaStream || mediaStreamRef.current
+    if (!activeRecorder || activeRecorder.state !== 'recording') {
       return
     }
 
-    recorder.stop()
+    setAutoAnalyzeAfterStop(triggeredByShortcut)
+    autoAnalyzeAfterStopRef.current = triggeredByShortcut
+    stopAudioMeter()
+    activeRecorder.stop()
     setRecordingState('正在处理录音...')
-    mediaStream?.getTracks().forEach((track) => track.stop())
+    activeMediaStream?.getTracks().forEach((track) => track.stop())
     appendLog(`已停止录音，当前分片数: ${recordedChunks.length}`)
+    window.bridgeApi.notifyOverlayState({
+      status: 'waiting',
+      title: '识别中',
+      subtitle: 'Thinking...',
+      level: 0,
+    })
   }
 
   return (
     <div className="app-shell dark">
       <div className="app-layout">
         <div className="app-main">
-          <Card className="hero-card">
+          {/* <Card className="hero-card">
             <CardHeader className="hero-card__header">
               <div>
                 <div className="eyebrow">Bridge / Windows Electron</div>
@@ -336,7 +737,7 @@ export function App() {
                 </ScrollArea>
               </div>
             </CardHeader>
-          </Card>
+          </Card> */}
 
           <div className="content-grid">
             <Card>
@@ -387,9 +788,8 @@ export function App() {
                 <Button className="footer-actions__grow" onClick={analyzeAudio} disabled={busy}>
                   {busy ? '分析中...' : '转写并匹配动作'}
                 </Button>
-                <div className="switch-group">
-                  <Switch checked={autoExecute} onCheckedChange={setAutoExecute} />
-                  <span>自动执行匹配结果</span>
+                <div className="helper-text">
+                  识别完成后将直接执行，无需二次批准。当前全局录音键：{shortcutState.shortcutLabel || '未设置'}。
                 </div>
               </CardFooter>
             </Card>
@@ -449,6 +849,46 @@ export function App() {
             <CardDescription>手动动作、文本指令和系统窗口列表都集中在右侧容器中。</CardDescription>
           </CardHeader>
           <CardContent className="sidebar-stack">
+            <section className="side-section">
+              <div className="subpanel__title">设置 / 全局录音键</div>
+              <div className="settings-card">
+                <div className="settings-card__row">
+                  <div className="settings-status">
+                    <span
+                      className={`settings-status__dot ${shortcutState.enabled ? 'settings-status__dot--ok' : ''}`}
+                    />
+                    <span>{shortcutState.enabled ? '全局键盘钩子已启用' : '全局键盘钩子不可用'}</span>
+                  </div>
+                  <span className="helper-text">{shortcutState.provider}</span>
+                </div>
+                <div className="shortcut-capture">
+                  <button
+                    type="button"
+                    className={`shortcut-capture__field ${shortcutCaptureActive ? 'shortcut-capture__field--capturing' : ''}`}
+                    onClick={() => {
+                      setShortcutCaptureActive(true)
+                      setShortcutHint('请直接按下目标按键或组合键，例如右 Alt、Ctrl + Space。')
+                    }}
+                  >
+                    <span className="shortcut-capture__label">{shortcutDraft.label || '点击后开始识别按键'}</span>
+                    <span className="shortcut-capture__hint">{shortcutCaptureActive ? '正在识别...' : '点击以重新录入'}</span>
+                  </button>
+                  <div className="helper-text">{shortcutHint}</div>
+                  <div className="helper-text">
+                    当前生效：{shortcutState.shortcutLabel || '未设置'}
+                    {shortcutState.lastTriggeredAt ? ` · 最近触发：${shortcutState.lastTriggeredAt}` : ''}
+                  </div>
+                  {shortcutState.lastDetectedLabel ? (
+                    <div className="helper-text">主进程最近识别到：{shortcutState.lastDetectedLabel}</div>
+                  ) : null}
+                  {shortcutState.error ? <div className="helper-text">错误：{shortcutState.error}</div> : null}
+                  <Button className="button-wide" onClick={saveShortcutDraft}>
+                    保存并启用按键
+                  </Button>
+                </div>
+              </div>
+            </section>
+
             <section className="side-section">
               <div className="subpanel__title">白名单动作</div>
               <div className="list-stack">

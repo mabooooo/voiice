@@ -117,7 +117,7 @@ export async function parseIntentWithWindows(commandText, windows) {
   const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
 
   const windowSummary = buildWindowSummary(windows)
-  const userPrompt = `请根据用户指令和当前窗口列表，返回 JSON：{"plan":[{"action":"...","args":{...},"source":"..."}]}\n\n用户指令：${transcript}\n\n当前窗口列表：\n${windowSummary}\n\n规则：\n1. 只返回 JSON，不要解释。\n2. 只允许动作：focus_front_window、close_front_window、focus_window、close_window、type_text_to_focused_input、open_app、send_shortcut。\n3. 如果用户明确提到某个现有窗口，或提到某个已经在窗口列表中的应用，例如“打开微信”“打开 Notion”，优先理解为把该应用现有窗口拉到最前，返回 focus_window，并使用窗口 id。\n4. 只有当窗口列表里不存在该应用窗口时，才允许返回 open_app。当前 open_app 仅允许 WeChat。\n5. 如果是模糊的“关闭这个窗口/聚焦当前窗口”，可返回 close_front_window / focus_front_window。\n6. 若要关闭/聚焦具体窗口，必须返回 close_window / focus_window，并在 args 中带上 shortId 或 handle。优先使用 shortId。\n7. send_shortcut 只允许 cmd+w、ctrl+w、alt+f4。\n8. 无法确定时返回空数组。`
+  const userPrompt = `请根据用户指令和当前窗口列表，返回 JSON：{"plan":[{"action":"...","args":{...},"source":"..."}]}\n\n用户指令：${transcript}\n\n当前窗口列表：\n${windowSummary}\n\n规则：\n1. 只返回 JSON，不要解释。\n2. 只允许动作：focus_front_window、close_front_window、focus_window、close_window、type_text_to_focused_input、open_app、send_shortcut。\n3. 如果用户明确提到某个现有窗口，或提到某个已经在窗口列表中的应用，例如“打开微信”“打开 Notion”，优先理解为把该应用现有窗口拉到最前，返回 focus_window，并使用窗口 id。\n4. 只有当窗口列表里不存在该应用的窗口时，才允许返回 open_app。\n5. 如果是模糊的“关闭这个窗口/聚焦当前窗口”，可返回 close_front_window / focus_front_window。\n6. 若要关闭/聚焦具体窗口，必须返回 close_window / focus_window，并在 args 中带上 shortId 或 handle。优先使用 shortId。\n7. send_shortcut 只允许 cmd+w、ctrl+w、alt+f4。\n8. 无法确定时返回空数组。`
 
   logLlmPrompt('parseIntentWithWindows', userPrompt)
 

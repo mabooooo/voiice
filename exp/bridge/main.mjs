@@ -5,9 +5,10 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 
 import { parseIntentWithWindows } from './src/intentParser.mjs'
+import { GlobalShortcutManager } from './src/shortcutManager.mjs'
 import { transcribeCommandAudio } from './src/transcribeQwen.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
@@ -33,6 +34,80 @@ dotenv.config({
 })
 
 const windowRegistry = new WindowRegistry()
+let mainWindow = null
+let overlayWindow = null
+let overlayResetTimer = null
+let recordingByShortcut = false
+const shortcutManager = new GlobalShortcutManager({
+  configPath: path.join(runtimeRoot, 'shortcut-config.json'),
+  onToggle: ({ triggeredLabel }) => {
+    recordingByShortcut = !recordingByShortcut
+    mainWindow?.webContents.send('bridge:recording-toggle', {
+      source: 'uiohook',
+      recording: recordingByShortcut,
+      shortcutLabel: triggeredLabel,
+    })
+  },
+  onStateChange: (payload) => {
+    mainWindow?.webContents.send('bridge:shortcut-state-push', payload)
+  },
+})
+
+const OVERLAY_DEFAULT_SIZE = {
+  width: 62,
+  height: 62,
+}
+const OVERLAY_MARGIN_BOTTOM = 28
+
+function computeOverlayBounds(width, height) {
+  const display = screen.getPrimaryDisplay()
+  const workArea = display.workArea
+  // 底部悬浮窗允许跟随内容真实收缩，避免外层窗口残留黑色矩形。
+  const targetWidth = Math.max(62, Math.round(width))
+  const targetHeight = Math.max(44, Math.round(height))
+
+  return {
+    width: targetWidth,
+    height: targetHeight,
+    x: Math.round(workArea.x + (workArea.width - targetWidth) / 2),
+    y: Math.round(workArea.y + workArea.height - targetHeight - OVERLAY_MARGIN_BOTTOM),
+  }
+}
+
+function pushOverlayState(payload) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return
+  }
+
+  overlayWindow.webContents.send('bridge:overlay-state-push', payload)
+}
+
+function setOverlayState(payload) {
+  if (overlayResetTimer) {
+    clearTimeout(overlayResetTimer)
+    overlayResetTimer = null
+  }
+
+  pushOverlayState(payload)
+
+  if (payload?.status === 'executing') {
+    overlayResetTimer = setTimeout(() => {
+      pushOverlayState({
+        status: 'idle',
+        title: 'Voice Bridge',
+        subtitle: '',
+      })
+    }, payload.autoResetMs ?? 4000)
+  }
+}
+
+function pushShortcutState(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  mainWindow.webContents.send('bridge:shortcut-state-push', payload)
+}
 
 async function executeBridgePlan(plan) {
   const results = []
@@ -70,7 +145,7 @@ async function executeBridgePlan(plan) {
 }
 
 function createWindow() {
-  const window = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1220,
     height: 900,
     minWidth: 1040,
@@ -84,7 +159,45 @@ function createWindow() {
   })
 
   // Electron 始终加载构建后的 React renderer，避免运行时依赖源码入口。
-  window.loadFile(path.join(__dirname, 'renderer-dist', 'index.html'))
+  mainWindow.loadFile(path.join(__dirname, 'renderer-dist', 'index.html'))
+  mainWindow.webContents.once('did-finish-load', () => {
+    pushShortcutState(shortcutManager.getState())
+  })
+}
+
+function createOverlayWindow() {
+  const bounds = computeOverlayBounds(OVERLAY_DEFAULT_SIZE.width, OVERLAY_DEFAULT_SIZE.height)
+
+  overlayWindow = new BrowserWindow({
+    ...bounds,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  overlayWindow.loadFile(path.join(__dirname, 'renderer-dist', 'index.html'), {
+    query: { mode: 'overlay' },
+  })
+  overlayWindow.once('ready-to-show', () => {
+    overlayWindow.showInactive()
+    setOverlayState({
+      status: 'idle',
+      title: 'Voice Bridge',
+      subtitle: '',
+    })
+  })
 }
 
 async function saveRecordingToTemp({ bytes, mimeType }) {
@@ -104,8 +217,10 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
   return filePath
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow()
+  createOverlayWindow()
+  await shortcutManager.start()
 
   ipcMain.handle('bridge:get-config-status', async () => {
     return {
@@ -113,7 +228,16 @@ app.whenReady().then(() => {
       baseUrl: process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: process.env.QWEN_MODEL || 'qwen3-omni-flash',
       platform: process.platform,
+      shortcut: shortcutManager.getState(),
     }
+  })
+
+  ipcMain.handle('bridge:get-shortcut-state', async () => {
+    return shortcutManager.getState()
+  })
+
+  ipcMain.handle('bridge:update-shortcut', async (_event, payload) => {
+    return shortcutManager.updateShortcut(payload)
   })
 
   ipcMain.handle('bridge:pick-audio-file', async () => {
@@ -179,9 +303,37 @@ app.whenReady().then(() => {
     return windowRegistry.performWindowAction(payload)
   })
 
+  ipcMain.handle('bridge:update-overlay-layout', async (_event, payload) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return null
+    }
+
+    const bounds = computeOverlayBounds(
+      payload?.width ?? OVERLAY_DEFAULT_SIZE.width,
+      payload?.height ?? OVERLAY_DEFAULT_SIZE.height,
+    )
+    overlayWindow.setBounds(bounds, true)
+    return bounds
+  })
+
+  ipcMain.on('bridge:overlay-state', (_event, payload) => {
+    if (payload?.status === 'listening') {
+      recordingByShortcut = true
+    }
+
+    if (payload?.status === 'waiting' || payload?.status === 'executing' || payload?.status === 'idle') {
+      if (payload.status !== 'listening') {
+        recordingByShortcut = false
+      }
+    }
+
+    setOverlayState(payload)
+  })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+      createOverlayWindow()
     }
   })
 })
@@ -190,4 +342,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('will-quit', () => {
+  shortcutManager.stop()
 })

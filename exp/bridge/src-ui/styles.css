@@ -36,6 +36,17 @@ body {
   min-height: 100vh;
 }
 
+html.overlay-mode,
+body.overlay-mode,
+body.overlay-mode #root {
+  background: transparent;
+}
+
+html.overlay-mode,
+body.overlay-mode {
+  min-height: auto;
+}
+
 button,
 input,
 textarea {
@@ -403,10 +414,293 @@ textarea {
   font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
+.overlay-root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.overlay-surface {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  box-shadow: none;
+  transition:
+    width 240ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    height 240ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    transform 240ms ease,
+    opacity 240ms ease;
+}
+
+.overlay-surface--idle {
+  width: 42px;
+  height: 42px;
+}
+
+.overlay-surface--listening,
+.overlay-surface--waiting {
+  width: 198px;
+  height: 52px;
+}
+
+.overlay-surface--executing {
+  width: 448px;
+  min-height: 154px;
+}
+
+.overlay-idle-dot-shell {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.06), transparent 44%),
+    rgba(0, 0, 0, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.overlay-idle-icon {
+  width: 16px;
+  height: 16px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.overlay-listening-shell,
+.overlay-thinking-shell {
+  position: relative;
+  width: 198px;
+  height: 52px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(33, 33, 35, 0.96), rgba(4, 4, 5, 0.98)),
+    rgba(0, 0, 0, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.overlay-listening-shell {
+  display: grid;
+  grid-template-columns: 34px 1fr 34px;
+  align-items: center;
+  padding: 0 9px;
+  gap: 8px;
+}
+
+.overlay-cap {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.overlay-cap--muted {
+  background: rgba(87, 87, 89, 0.82);
+}
+
+.overlay-cap--bright {
+  background: rgba(255, 255, 255, 0.96);
+  color: #0a0a0a;
+}
+
+.overlay-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.overlay-listening-bars {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 18px;
+}
+
+.overlay-listening-bars span {
+  width: 3px;
+  height: 16px;
+  border-radius: 999px;
+  transform-origin: center;
+  background: rgba(255, 255, 255, 0.92);
+  transition: transform 90ms ease-out, opacity 90ms ease-out;
+}
+
+.overlay-thinking-shell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 0 0 18px;
+}
+
+.overlay-thinking-tone {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 78px;
+  background: linear-gradient(90deg, rgba(110, 110, 112, 0.64), rgba(52, 52, 54, 0.3));
+}
+
+.overlay-thinking-copy {
+  position: relative;
+  z-index: 1;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.overlay-thinking-mask {
+  position: absolute;
+  inset: 0 0 0 92px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.overlay-result-card {
+  width: 400px;
+  min-height: 100px;
+  border-radius: 18px;
+  background:
+     rgba(32, 28, 28, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 18px 18px;
+  display: grid;
+  gap: 18px;
+}
+
+.overlay-result-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.overlay-result-card__title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.overlay-info-icon {
+  width: 19px;
+  height: 19px;
+  color: #7e93ff;
+  flex-shrink: 0;
+}
+
+.overlay-result-card__title {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.overlay-result-card__body {
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@keyframes overlay-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .window-item__meta {
   color: var(--muted-foreground);
   font-size: 0.78rem;
   font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 4px);
+  background: #0d0d0f;
+  padding: 14px;
+}
+
+.settings-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.84rem;
+  color: var(--muted-foreground);
+}
+
+.settings-status__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #52525b;
+}
+
+.settings-status__dot--ok {
+  background: #fafafa;
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.24);
+}
+
+.shortcut-capture {
+  display: grid;
+  gap: 10px;
+}
+
+.shortcut-capture__field {
+  width: 100%;
+  min-height: 52px;
+  border-radius: calc(var(--radius) - 4px);
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
+    #101012;
+  color: var(--foreground);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  cursor: text;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.shortcut-capture__field:focus,
+.shortcut-capture__field--capturing {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+
+.shortcut-capture__label {
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 0.88rem;
+}
+
+.shortcut-capture__hint {
+  color: var(--muted-foreground);
+  font-size: 0.76rem;
 }
 
 .ui-button--sm {

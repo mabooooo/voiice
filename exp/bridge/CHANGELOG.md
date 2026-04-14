@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.6
+
+### Changed
+
+- 日志中的“匹配到 N 个白名单动作”现在会同时列出具体动作明细，便于直接确认转写后的执行意图。
+
+### Fixed
+
+- 窗口 `focus` 动作改为优先走原生恢复流程：最小化时先 `SW_RESTORE`，再执行前台激活。
+- 新增 `AttachThreadInput`、`BringWindowToTop`、`SetWindowPos` 辅助提升后台窗口调起成功率。
+- 不再依赖前端按 `restoreBounds` 手动还原位置，优先使用 Windows 自身保存的恢复位置。
+- 窗口列表现在会保留最小化窗口，不再因当前尺寸过小而被过滤掉。
+- 窗口快照新增 `state` 与 `restoreBounds`，便于区分 `normal / minimized / maximized` 并显示恢复后位置。
+
 ## 0.0.5
 
 ### Fixed

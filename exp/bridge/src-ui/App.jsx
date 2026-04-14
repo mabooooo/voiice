@@ -24,6 +24,30 @@ function formatJson(value) {
   return JSON.stringify(value, null, 2)
 }
 
+function formatActionList(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '无'
+  }
+
+  return items
+    .map((item) => {
+      if (item.action === 'open_app') {
+        return `open_app(${item.args?.name ?? ''})`
+      }
+
+      if (item.action === 'send_shortcut') {
+        return `send_shortcut(${item.args?.shortcut ?? ''})`
+      }
+
+      if (item.action === 'type_text_to_focused_input') {
+        return `type_text_to_focused_input(${item.args?.text ?? ''})`
+      }
+
+      return item.action
+    })
+    .join(', ')
+}
+
 function WindowListItem({ item, onOpen }) {
   return (
     <button type="button" className="window-item" onClick={() => onOpen(item.handle)}>
@@ -32,6 +56,7 @@ function WindowListItem({ item, onOpen }) {
       <span className="window-item__meta">
         {item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}
       </span>
+      <span className="window-item__meta">state: {item.state || 'unknown'}</span>
     </button>
   )
 }
@@ -39,7 +64,7 @@ function WindowListItem({ item, onOpen }) {
 export function App() {
   const [configStatus, setConfigStatus] = useState('读取配置中...')
   const [audioPath, setAudioPath] = useState('')
-  const [prompt, setPrompt] = useState('请只返回这段语音对应的操作意图文本，不要解释。')
+  const [prompt, setPrompt] = useState('如果语音是OS操作意图，那么请只返回这段语音对应的操作意图文本，不要解释。否则请简短回答用户的提问。')
   const [stream, setStream] = useState(false)
   const [autoExecute, setAutoExecute] = useState(false)
   const [transcript, setTranscript] = useState('')
@@ -182,7 +207,9 @@ export function App() {
       setPlan(result.matched?.plan || [])
       setTiming(result.timing || {})
       setUsage(result.usage || {})
-      appendLog(`转写完成，匹配到 ${(result.matched?.plan || []).length} 个白名单动作。`)
+      appendLog(
+        `转写完成，匹配到 ${(result.matched?.plan || []).length} 个白名单动作：${formatActionList(result.matched?.plan || [])}`,
+      )
 
       if (autoExecute && (result.matched?.plan || []).length > 0) {
         await executePlan(result.matched.plan)
@@ -221,7 +248,7 @@ export function App() {
       setPlan(matched.plan || [])
       setTiming({})
       setUsage({})
-      appendLog(`文本指令已匹配 ${(matched.plan || []).length} 个动作。`)
+      appendLog(`文本指令已匹配 ${(matched.plan || []).length} 个动作：${formatActionList(matched.plan || [])}`)
       if ((matched.plan || []).length > 0) {
         await executePlan(matched.plan)
       }

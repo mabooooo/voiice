@@ -13,17 +13,36 @@ public struct RECT {
   public int Right;
   public int Bottom;
 }
+public struct POINT {
+  public int X;
+  public int Y;
+}
+public struct WINDOWPLACEMENT {
+  public int length;
+  public int flags;
+  public int showCmd;
+  public POINT ptMinPosition;
+  public POINT ptMaxPosition;
+  public RECT rcNormalPosition;
+}
 public static class BridgeWindowApi {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 }
@@ -58,13 +77,22 @@ $callback = [EnumWindowsProc]{
   $classBuilder = New-Object System.Text.StringBuilder 256
   [BridgeWindowApi]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
 
+  $placement = New-Object WINDOWPLACEMENT
+  $placement.length = [System.Runtime.InteropServices.Marshal]::SizeOf([WINDOWPLACEMENT])
+  [BridgeWindowApi]::GetWindowPlacement($hWnd, [ref]$placement) | Out-Null
+  $isMinimized = [BridgeWindowApi]::IsIconic($hWnd)
+  $windowState = if ($isMinimized) { "minimized" } elseif ($placement.showCmd -eq 3) { "maximized" } else { "normal" }
+
   $rect = New-Object RECT
   [BridgeWindowApi]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
   $width = $rect.Right - $rect.Left
   $height = $rect.Bottom - $rect.Top
-  if ($width -le 40 -or $height -le 40) {
+  if (-not $isMinimized -and ($width -le 40 -or $height -le 40)) {
     return $true
   }
+
+  $restoreWidth = $placement.rcNormalPosition.Right - $placement.rcNormalPosition.Left
+  $restoreHeight = $placement.rcNormalPosition.Bottom - $placement.rcNormalPosition.Top
 
   $processId = 0
   [BridgeWindowApi]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
@@ -84,11 +112,18 @@ $callback = [EnumWindowsProc]{
     processId = [int]$processId
     processPath = $processPath
     className = $classBuilder.ToString()
+    state = $windowState
     bounds = [PSCustomObject]@{
       x = [int]$rect.Left
       y = [int]$rect.Top
       width = [int]$width
       height = [int]$height
+    }
+    restoreBounds = [PSCustomObject]@{
+      x = [int]$placement.rcNormalPosition.Left
+      y = [int]$placement.rcNormalPosition.Top
+      width = [int]$restoreWidth
+      height = [int]$restoreHeight
     }
   }) | Out-Null
 
@@ -111,8 +146,31 @@ function buildWindowActionScript(action, handle, bounds, processId) {
   const actionBody =
     action === 'focus'
       ? `
-[BridgeWindowApi]::ShowWindowAsync($hWnd, 5) | Out-Null
-[BridgeWindowApi]::SetForegroundWindow($hWnd) | Out-Null
+# 最小化窗口要先恢复，Windows 会按自身保存的 restoreBounds 还原位置。
+$foreground = [BridgeWindowApi]::GetForegroundWindow()
+$targetThread = [BridgeWindowApi]::GetWindowThreadProcessId($hWnd, [IntPtr]::Zero)
+$foregroundThread = if ($foreground -ne [IntPtr]::Zero) { [BridgeWindowApi]::GetWindowThreadProcessId($foreground, [IntPtr]::Zero) } else { 0 }
+
+if ([BridgeWindowApi]::IsIconic($hWnd)) {
+  [BridgeWindowApi]::ShowWindowAsync($hWnd, 9) | Out-Null
+} else {
+  [BridgeWindowApi]::ShowWindowAsync($hWnd, 5) | Out-Null
+}
+
+if ($foregroundThread -gt 0 -and $targetThread -gt 0 -and $foregroundThread -ne $targetThread) {
+  [BridgeWindowApi]::AttachThreadInput($foregroundThread, $targetThread, $true) | Out-Null
+  try {
+    [BridgeWindowApi]::BringWindowToTop($hWnd) | Out-Null
+    [BridgeWindowApi]::SetForegroundWindow($hWnd) | Out-Null
+    [BridgeWindowApi]::SetWindowPos($hWnd, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002) | Out-Null
+    [BridgeWindowApi]::SetWindowPos($hWnd, [IntPtr](-2), 0, 0, 0, 0, 0x0001 -bor 0x0002) | Out-Null
+  } finally {
+    [BridgeWindowApi]::AttachThreadInput($foregroundThread, $targetThread, $false) | Out-Null
+  }
+} else {
+  [BridgeWindowApi]::BringWindowToTop($hWnd) | Out-Null
+  [BridgeWindowApi]::SetForegroundWindow($hWnd) | Out-Null
+}
 `
       : action === 'close'
         ? `
@@ -151,6 +209,7 @@ ${actionBody}
   action = '${action}'
   handle = '${safeHandle}'
   stillExists = [BridgeWindowApi]::IsWindow($hWnd)
+  isMinimized = [BridgeWindowApi]::IsIconic($hWnd)
 } | ConvertTo-Json -Depth 3
 `
 }

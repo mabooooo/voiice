@@ -18,6 +18,8 @@ dist-ssr
 *.local
 .env
 .env.*
+exp/**/.env
+exp/**/.env.*
 
 # Editor directories and files
 .vscode/*
@@ -40,6 +42,7 @@ capsule-debug*.png
 jelly-reference*.png
 *.zip
 .playwright-mcp/
+exp/qwen3-omni-flash/speech/*
 
 # Database files
 *.db

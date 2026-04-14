@@ -1,0 +1,14 @@
+{
+  "name": "qwen3-omni-flash-exp",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Independent Node experiment for Aliyun Bailian Qwen3-Omni-Flash.",
+  "scripts": {
+    "start": "node --env-file=.env ./index.mjs",
+    "transcribe": "node --env-file=.env ./index.mjs"
+  },
+  "dependencies": {
+    "openai": "^4.104.0"
+  }
+}

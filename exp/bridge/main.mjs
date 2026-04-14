@@ -25,13 +25,14 @@ function createWindow() {
     minHeight: 760,
     backgroundColor: '#111827',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.mjs'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
 
-  window.loadFile(path.join(__dirname, 'index.html'))
+  // Electron 始终加载构建后的 React renderer，避免运行时依赖源码入口。
+  window.loadFile(path.join(__dirname, 'renderer-dist', 'index.html'))
 }
 
 async function saveRecordingToTemp({ bytes, mimeType }) {

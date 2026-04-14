@@ -4,6 +4,7 @@
 
 ## 当前能力
 
+- 使用 React renderer，并采用轻量的 shadcn 风格组件组织界面
 - 选择本地音频文件进行测试
 - 使用麦克风录音并导入测试
 - 调用阿里云百炼北京节点 `qwen3-omni-flash` 做音频转写
@@ -63,4 +64,5 @@ npm run start
 - 非流式模式更适合短语音指令场景
 - `cmd+w` 在 Windows 里会映射为 `Ctrl+W`
 - 当前桌面控制通过 Electron 主进程调用 PowerShell 完成
+- 当前界面为 React + Vite 构建产物，Electron 启动前会先构建 renderer
 - 后续可以把 `src/windowsController.mjs` 替换为 Go / Rust 守护进程 RPC

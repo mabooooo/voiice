@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.3
+
+### Fixed
+
+- 修复 Electron preload 使用 ESM 导致的加载失败问题，改为 `preload.cjs`。
+- 修复 React renderer 在 `file://` 场景下资源路径错误的问题，Vite 构建改为相对 `./assets/...`。
+
+## 0.0.2
+
+### Changed
+
+- 将 renderer 从原始 DOM 脚本切换为 React + Vite 结构。
+- 新增轻量 shadcn 风格 UI 组件目录 `src-ui/components/ui`。
+- 界面改为默认夜间模式，统一为黑白配色。
+- 右侧新增独立操作侧栏，集中放置手动白名单动作和手动文本指令入口。
+- Electron 启动流程改为先构建 React renderer，再加载 `renderer-dist/index.html`。
+
 ## 0.0.1
 
 ### Added

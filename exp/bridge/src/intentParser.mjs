@@ -1,24 +1,9 @@
 import path from 'node:path'
 
-import OpenAI from 'openai'
-
 import { parseActionsFromTranscript } from './commandMatcher.mjs'
 import { logLlmPrompt, logLlmResponse } from './llmDebug.mjs'
+import { buildProviderExtraBody, createCompatibleClient, normalizeProvider } from './providerConfig.mjs'
 import { buildAudioDataUrl, prepareAudioForUpload } from './transcribeQwen.mjs'
-
-function createDashscopeClient() {
-  const apiKey = process.env.DASHSCOPE_API_KEY
-  const baseURL = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-
-  if (!apiKey) {
-    throw new Error('未读取到 DASHSCOPE_API_KEY，请先在 exp/bridge/.env 中配置。')
-  }
-
-  return new OpenAI({
-    apiKey,
-    baseURL,
-  })
-}
 
 function buildWindowSummary(windows) {
   if (!Array.isArray(windows) || windows.length === 0) {
@@ -218,7 +203,7 @@ function finalizeIntentResult(raw, transcriptFallback, windows, parser) {
   }
 }
 
-export async function parseIntentWithWindows(commandText, windows) {
+export async function parseIntentWithWindows(commandText, windows, options = {}) {
   const transcript = commandText.trim()
   if (!transcript) {
     return {
@@ -230,20 +215,23 @@ export async function parseIntentWithWindows(commandText, windows) {
     }
   }
 
-  const client = createDashscopeClient()
-  const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
+  const provider = normalizeProvider(options.provider)
+  const { client, config } = createCompatibleClient(provider)
+  const extraBody = buildProviderExtraBody(provider)
 
   const userPrompt = buildIntentUserPrompt(transcript, windows)
 
-  logLlmPrompt('parseIntentWithWindows', userPrompt)
+  logLlmPrompt('parseIntentWithWindows', {
+    provider,
+    model: config.model,
+    prompt: userPrompt,
+  })
 
   const completion = await client.chat.completions.create({
-    model,
+    model: config.model,
     stream: false,
     modalities: ['text'],
-    extra_body: {
-      enable_thinking: false,
-    },
+    extra_body: extraBody,
     messages: [
       {
         role: 'system',
@@ -263,13 +251,17 @@ export async function parseIntentWithWindows(commandText, windows) {
 }
 
 export async function parseAudioIntentWithWindows(filePath, windows, options = {}) {
-  const client = createDashscopeClient()
-  const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
-  const stream = Boolean(options.stream)
+  const provider = normalizeProvider(options.provider)
+  const { client, config } = createCompatibleClient(provider)
+  const extraBody = buildProviderExtraBody(provider)
+  // 语音链路固定关闭流式，避免分片输出增加状态复杂度。
+  const stream = false
   const userPrompt = buildAudioIntentUserPrompt(windows)
   const { uploadPath, format, converted } = await prepareAudioForUpload(path.resolve(filePath))
 
   logLlmPrompt('parseAudioIntentWithWindows', {
+    provider,
+    model: config.model,
     prompt: userPrompt,
     audioFilePath: path.resolve(filePath),
     audioFormat: format,
@@ -283,11 +275,9 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
   let firstTextLatencyMs = null
 
   const requestPayload = {
-    model,
+    model: config.model,
     modalities: ['text'],
-    extra_body: {
-      enable_thinking: false,
-    },
+    extra_body: extraBody,
     messages: [
       {
         role: 'system',

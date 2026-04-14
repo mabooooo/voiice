@@ -1,4 +1,31 @@
 # Changelog
+## 0.0.31 Xiaomi thinking 配置补齐
+
+### Changed
+
+- Xiaomi MiMo 请求现在会在 `extra_body` 中额外补齐 `thinking.type = disable`，避免仅传 `enable_thinking: false` 时的兼容问题。
+- README 补充 Xiaomi provider 的使用说明，明确请求 body 需要关闭 thinking。
+
+## 0.0.30 接入 Xiaomi provider 并支持 endpoint 切换
+
+### Added
+
+- 新增统一 provider 配置模块，支持 `qwen / xiaomi` 两套 `apiKey / baseURL / model` 分发。
+- `.env.example` 新增 Xiaomi MiMo 相关配置项：`XIAOMI_MIMO_API_KEY / XIAOMI_MIMO_BASE_URL / XIAOMI_MIMO_MODEL`。
+- 设置页新增 endpoint 选择器，可在 `Qwen` 和 `Xiaomi MiMo` 间切换，并显示当前 provider 的模型、baseURL 和配置状态。
+
+### Changed
+
+- 语音链路和手动文本指令链路都会按当前 UI 选择的 provider 发起请求。
+- 主进程 `get-config-status` 现在会返回两套 provider 的状态，供前端设置页展示。
+
+## 0.0.29 固定关闭流式与深度思考
+
+### Changed
+
+- 语音分析链路固定使用非流式模式，不再从 UI 暴露流式开关。
+- 调试与运行逻辑统一按 `enable_thinking: false`、`stream: false` 执行，减少状态分支。
+
 ## 0.0.12 多屏桌面工具、屏幕指示器与耳机录音优化
 
 ### Added

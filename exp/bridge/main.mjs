@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 
 import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
+import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
@@ -351,6 +352,7 @@ app.whenReady().then(async () => {
       hasDashscopeApiKey: Boolean(process.env.DASHSCOPE_API_KEY),
       baseUrl: process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: process.env.QWEN_MODEL || 'qwen3-omni-flash',
+      providers: listProviderStatuses(),
       platform: process.platform,
       shortcut: shortcutManager.getState(),
     }
@@ -401,11 +403,10 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {
+    const provider = normalizeProvider(payload?.provider)
     // 每次发送语音前都强制刷新窗口快照，确保传给 LLM 的是最新前台状态。
     const windows = await windowRegistry.refreshSnapshot()
-    const matched = await parseAudioIntentWithWindows(payload.filePath, windows.items, {
-      stream: payload.stream,
-    })
+    const matched = await parseAudioIntentWithWindows(payload.filePath, windows.items, { provider })
 
     return {
       transcript: matched.stt || '',
@@ -423,10 +424,12 @@ app.whenReady().then(async () => {
     }
   })
 
-  ipcMain.handle('bridge:match-transcript', async (_event, transcript) => {
+  ipcMain.handle('bridge:match-transcript', async (_event, payload) => {
+    const transcript = typeof payload === 'string' ? payload : payload?.transcript || ''
+    const provider = normalizeProvider(payload?.provider)
     // 手动文本指令也复用最新窗口快照，避免和语音链路行为不一致。
     const windows = await windowRegistry.refreshSnapshot()
-    return parseIntentWithWindows(transcript, windows.items)
+    return parseIntentWithWindows(transcript, windows.items, { provider })
   })
 
   ipcMain.handle('bridge:execute-plan', async (_event, payload) => {

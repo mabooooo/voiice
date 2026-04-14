@@ -5,7 +5,6 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { CornerIndicatorPanel } from '@/features/desktop-utilities/CornerIndicatorPanel'
 import { DesktopCapturePanel } from '@/features/desktop-utilities/DesktopCapturePanel'
@@ -15,7 +14,12 @@ const ACTIVE_MENU = { developer: 'developer', settings: 'settings' }
 const STORAGE_KEYS = {
   activeMenu: 'voice-bridge-active-menu',
   microphoneId: 'voice-bridge-microphone-id',
+  provider: 'voice-bridge-provider',
 }
+const PROVIDER_OPTIONS = [
+  { value: 'qwen', label: 'Qwen' },
+  { value: 'xiaomi', label: 'Xiaomi MiMo' },
+]
 
 const SPECIAL_SHORTCUT_LABELS = {
   AltLeft: '左 Alt', AltRight: '右 Alt', ShiftLeft: '左 Shift', ShiftRight: '右 Shift',
@@ -148,9 +152,10 @@ function Navigation({ activeMenu, onSelect }) {
 
 export function App() {
   const [configStatus, setConfigStatus] = useState('读取配置中...')
+  const [runtimeConfig, setRuntimeConfig] = useState(null)
   const [activeMenu, setActiveMenu] = useState(() => localStorage.getItem(STORAGE_KEYS.activeMenu) || ACTIVE_MENU.developer)
   const [audioPath, setAudioPath] = useState('')
-  const [stream, setStream] = useState(false)
+  const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(STORAGE_KEYS.provider) || 'qwen')
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
   const [timing, setTiming] = useState({})
@@ -194,6 +199,7 @@ export function App() {
   const renderedPlan = useMemo(() => formatJson(plan), [plan])
 
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.activeMenu, activeMenu) }, [activeMenu])
+  useEffect(() => { localStorage.setItem(STORAGE_KEYS.provider, selectedProvider) }, [selectedProvider])
   useEffect(() => {
     selectedInputDeviceIdRef.current = selectedInputDeviceId
     localStorage.setItem(STORAGE_KEYS.microphoneId, selectedInputDeviceId)
@@ -245,6 +251,7 @@ export function App() {
 
   useEffect(() => {
     window.bridgeApi.getConfigStatus().then((status) => {
+      setRuntimeConfig(status)
       setConfigStatus(formatJson(status))
       if (status.shortcut) {
         setShortcutState(status.shortcut)
@@ -402,7 +409,7 @@ export function App() {
     window.bridgeApi.notifyOverlayState({ status: 'waiting', title: '识别中', subtitle: '等待服务器返回...' })
 
     try {
-      const result = await window.bridgeApi.analyzeAudio({ filePath, stream })
+      const result = await window.bridgeApi.analyzeAudio({ filePath, provider: selectedProvider })
       setTranscript(result.transcript || '')
       setPlan(result.matched?.plan || [])
       setTiming(result.timing || {})
@@ -514,7 +521,10 @@ export function App() {
       return
     }
     try {
-      const matched = await window.bridgeApi.matchTranscript(manualCommand.trim())
+      const matched = await window.bridgeApi.matchTranscript({
+        transcript: manualCommand.trim(),
+        provider: selectedProvider,
+      })
       setTranscript(manualCommand.trim())
       setPlan(matched.plan || [])
       setTiming({})
@@ -649,6 +659,30 @@ export function App() {
 
         <Card>
           <CardHeader>
+            <div><div className="section-label">Endpoint</div><CardTitle>模型端点</CardTitle></div>
+            <CardDescription>在这里切换当前使用的多模态 provider。</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            <label className="field">
+              <span className="field__label">当前 endpoint</span>
+              <select className="ui-select" value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value)}>
+                {PROVIDER_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            <div className="helper-text">
+              当前模型：{runtimeConfig?.providers?.[selectedProvider]?.model || '未配置'}
+            </div>
+            <div className="helper-text">
+              当前 baseURL：{runtimeConfig?.providers?.[selectedProvider]?.baseURL || '未配置'}
+            </div>
+            <div className="helper-text">
+              配置状态：{runtimeConfig?.providers?.[selectedProvider]?.configured ? '已配置 API Key' : '缺少 API Key'}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
             <div><div className="section-label">Audio</div><CardTitle>麦克风输入设备</CardTitle></div>
             <CardDescription>录音时会优先使用这里选中的输入设备。</CardDescription>
           </CardHeader>
@@ -681,27 +715,12 @@ export function App() {
     return (
       <div className="developer-layout">
         <div className="app-main">
-          <Card className="hero-card">
-            <CardHeader className="hero-card__header">
-              <div>
-                <div className="eyebrow">Bridge / Windows Electron</div>
-                <CardTitle className="hero-title">开发者模式</CardTitle>
-                <CardDescription className="hero-description">当前页面聚合音频输入、意图分析、白名单动作执行和窗口调度能力，作为独立实验台使用。</CardDescription>
-              </div>
-              <div className="runtime-box">
-                <div className="runtime-box__title">Runtime</div>
-                <ScrollArea className="runtime-box__scroll">
-                  <pre className="console-block console-block--compact">{configStatus}</pre>
-                </ScrollArea>
-              </div>
-            </CardHeader>
-          </Card>
 
           <div className="content-grid">
             <Card>
               <CardHeader>
                 <div><div className="section-label">Input</div><CardTitle>音频输入</CardTitle></div>
-                <div className="switch-group"><Switch checked={stream} onCheckedChange={setStream} /><span>流式转写</span></div>
+                <div className="helper-text">固定使用非流式、非深度思考模式。</div>
               </CardHeader>
               <CardContent className="stack">
                 <label className="field">

@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   captureDesktopScreenshot: (payload) => ipcRenderer.invoke('bridge:capture-desktop-screenshot', payload),
   showCornerIndicators: () => ipcRenderer.invoke('bridge:show-corner-indicators'),
   analyzeAudio: (payload) => ipcRenderer.invoke('bridge:analyze-audio', payload),
-  matchTranscript: (transcript) => ipcRenderer.invoke('bridge:match-transcript', transcript),
+  matchTranscript: (payload) => ipcRenderer.invoke('bridge:match-transcript', payload),
   executePlan: (payload) => ipcRenderer.invoke('bridge:execute-plan', payload),
   listWindows: () => ipcRenderer.invoke('bridge:list-windows'),
   refreshWindows: () => ipcRenderer.invoke('bridge:refresh-windows'),

@@ -51,7 +51,23 @@ npm install
 DASHSCOPE_API_KEY=你的百炼Key
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen3-omni-flash
+
+XIAOMI_MIMO_API_KEY=你的 Xiaomi Key
+XIAOMI_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+XIAOMI_MIMO_MODEL=mimo-v2-omni
 ```
+
+如果切到 `Xiaomi MiMo` provider，请求 body 里需要额外带上：
+
+```json
+{
+  "thinking": {
+    "type": "disable"
+  }
+}
+```
+
+当前项目已在请求的 `extra_body` 中自动补齐该配置，并继续统一传递 `enable_thinking: false`。
 
 ## 启动
 

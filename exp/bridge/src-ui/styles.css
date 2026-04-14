@@ -58,6 +58,102 @@ textarea {
   padding: 24px;
 }
 
+.workspace-layout {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 22px;
+  max-width: 1520px;
+  margin: 0 auto;
+}
+
+.workspace-content {
+  min-width: 0;
+}
+
+.nav-rail {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 4px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
+    rgba(11, 11, 13, 0.92);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+}
+
+.nav-rail__brand {
+  display: grid;
+  gap: 6px;
+}
+
+.nav-rail__eyebrow {
+  color: var(--muted-foreground);
+  font-size: 0.74rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.nav-rail__title {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.nav-rail__items {
+  display: grid;
+  gap: 10px;
+}
+
+.nav-item {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: calc(var(--radius) - 4px);
+  border: 1px solid var(--border);
+  background: #101012;
+  color: var(--foreground);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.nav-item:hover {
+  background: #17171b;
+  border-color: #3f3f46;
+}
+
+.nav-item--active {
+  background: #f5f5f5;
+  color: #09090b;
+  border-color: #f5f5f5;
+}
+
+.nav-item__label {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.nav-item__meta {
+  font-size: 0.78rem;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.developer-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 20px;
+}
+
+.settings-layout {
+  display: grid;
+  gap: 20px;
+}
+
 .app-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) 360px;
@@ -226,7 +322,8 @@ textarea {
 }
 
 .ui-input,
-.ui-textarea {
+.ui-textarea,
+.ui-select {
   width: 100%;
   border-radius: calc(var(--radius) - 6px);
   border: 1px solid var(--border);
@@ -243,9 +340,15 @@ textarea {
 }
 
 .ui-input:focus,
-.ui-textarea:focus {
+.ui-textarea:focus,
+.ui-select:focus {
   border-color: var(--ring);
   box-shadow: 0 0 0 1px var(--ring);
+}
+
+.ui-select {
+  appearance: none;
+  cursor: pointer;
 }
 
 .ui-button {
@@ -773,6 +876,8 @@ textarea {
 }
 
 @media (max-width: 800px) {
+  .workspace-layout,
+  .developer-layout,
   .app-layout,
   .content-grid,
   .analysis-grid,
@@ -785,8 +890,14 @@ textarea {
     align-items: stretch;
   }
 
+  .workspace-layout,
+  .developer-layout,
   .app-layout {
     grid-template-columns: 1fr;
+  }
+
+  .nav-rail {
+    position: static;
   }
 
   .runtime-box {

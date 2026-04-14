@@ -1,4 +1,22 @@
 # Changelog
+## 0.0.11 合并音频链路，input_text 改为剪贴板粘贴，Prompt 改为多行 Markdown 函数说明
+
+### Changed
+
+- `input_text` 不再逐字模拟键盘输入，改为“写入剪贴板 + 发送 Ctrl+V”。
+- 这样可以避开中文输入法和键盘布局导致的字符偏差，提升中文文本输入稳定性。
+- 语音分析入口不再先走 `transcribeCommandAudio` 再走 `parseIntentWithWindows`。
+- 现在会把 `音频 + 文本 prompt + 最新窗口列表` 一次性发给模型，直接返回 `stt + plan`。
+- `parseIntentWithWindows` 的用户 prompt 改为多行模板字符串，后续调整更直接。
+- 函数说明改为 Markdown 列表，并把关键使用约束直接挂在各函数条目下，减少规则和函数定义分离造成的歧义。
+- 当 LLM 已成功返回合法 JSON 且 `plan` 为空时，不再继续走本地规则 fallback，避免空结果误触发 `open_app`。
+- 手动文本指令仍保留纯文本解析链路，不受这次变更影响。
+
+### Fixed
+
+- 每次发送语音前，主进程都会先刷新一次窗口快照，再把最新窗口列表传给 LLM。
+- 手动文本指令在匹配前也会强制刷新窗口快照，避免和语音链路使用不同步的窗口状态。
+
 ## 0.0.10 窗口 id 兼容、函数集简化与 PowerShell 清洗
 
 ### Added

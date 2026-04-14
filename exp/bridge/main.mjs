@@ -7,9 +7,8 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 
-import { parseIntentWithWindows } from './src/intentParser.mjs'
+import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
-import { transcribeCommandAudio } from './src/transcribeQwen.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
 
@@ -265,20 +264,31 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {
-    const analysis = await transcribeCommandAudio(payload.filePath, {
+    // 每次发送语音前都强制刷新窗口快照，确保传给 LLM 的是最新前台状态。
+    const windows = await windowRegistry.refreshSnapshot()
+    const matched = await parseAudioIntentWithWindows(payload.filePath, windows.items, {
       stream: payload.stream,
     })
 
-    const windows = await windowRegistry.listWindows()
-    const matched = await parseIntentWithWindows(analysis.transcript, windows.items)
     return {
-      ...analysis,
-      matched,
+      transcript: matched.stt || '',
+      usage: matched.usage || null,
+      timing: matched.timing || {},
+      matched: {
+        transcript: matched.transcript,
+        stt: matched.stt,
+        plan: matched.plan,
+        unmatchedSegments: matched.unmatchedSegments,
+        safe: matched.safe,
+        parser: matched.parser,
+        raw: matched.raw,
+      },
     }
   })
 
   ipcMain.handle('bridge:match-transcript', async (_event, transcript) => {
-    const windows = await windowRegistry.listWindows()
+    // 手动文本指令也复用最新窗口快照，避免和语音链路行为不一致。
+    const windows = await windowRegistry.refreshSnapshot()
     return parseIntentWithWindows(transcript, windows.items)
   })
 

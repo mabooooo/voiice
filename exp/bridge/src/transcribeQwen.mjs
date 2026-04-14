@@ -37,7 +37,7 @@ function runFfmpegConvert(inputPath, outputPath) {
   })
 }
 
-async function prepareAudioForUpload(filePath) {
+export async function prepareAudioForUpload(filePath) {
   const extension = path.extname(filePath).replace('.', '').toLowerCase()
 
   if (DIRECT_AUDIO_FORMATS.has(extension)) {
@@ -58,7 +58,7 @@ async function prepareAudioForUpload(filePath) {
   }
 }
 
-function buildAudioDataUrl(filePath, format) {
+export function buildAudioDataUrl(filePath, format) {
   const buffer = fs.readFileSync(filePath)
   return `data:audio/${format};base64,${buffer.toString('base64')}`
 }

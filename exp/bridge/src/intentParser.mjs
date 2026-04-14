@@ -1,7 +1,10 @@
+import path from 'node:path'
+
 import OpenAI from 'openai'
 
 import { parseActionsFromTranscript } from './commandMatcher.mjs'
 import { logLlmPrompt, logLlmResponse } from './llmDebug.mjs'
+import { buildAudioDataUrl, prepareAudioForUpload } from './transcribeQwen.mjs'
 
 function createDashscopeClient() {
   const apiKey = process.env.DASHSCOPE_API_KEY
@@ -28,6 +31,89 @@ function buildWindowSummary(windows) {
       return `id=${item.shortId} | appName=${item.appName || 'unknown'} | title=${item.title} | state=${state}`
     })
     .join('\n')
+}
+
+function buildIntentSystemPrompt() {
+  return [
+    '你是桌面动作解析器。用户不会和你打招呼、询问你任何问题，你只要帮助用户将意图转写成工具函数。你绝对不能误以为用户在询问你任何问题。',
+    '你只能返回 JSON，不能解释。',
+    '返回格式固定为 {"translate":"...","plan":[{"action":"...","args":{...}},{若需要1个以上的动作},...],"reason":"如果不调用input_text函数，简短解释你不调用的原因"}。',
+  ].join('\n')
+}
+
+function buildIntentUserPrompt(transcript, windows) {
+  const windowSummary = buildWindowSummary(windows)
+
+  // 这里改成多行模板字符串，后续调整函数说明和规则时更直观。
+  return `
+用户指令：
+${transcript}
+
+窗口列表：
+${windowSummary}
+
+可选函数：
+- \`focus_current()\`
+  适用于“切到当前窗口 / 聚焦当前窗口”这类没有明确目标窗口的指令。
+- \`close_current()\`
+  适用于“关闭这个窗口”这类没有明确目标窗口的指令。
+- \`focus_window({ id: "" })\`
+  适用于要聚焦某个具体窗口；必须从窗口列表里选 id，只传 \`id\`。
+  如果用户说“打开 A”，但窗口列表里已经有 A 的窗口，优先用这个函数，不要用 \`open_app\`。
+- \`close_window({ id: "" })\`
+  适用于要关闭某个具体窗口；必须从窗口列表里选 id，只传 \`id\`。
+- \`input_text({ text: "" })\`
+  适用于用户要求输入、回复、填写文本的情况；请使用该函数帮助用户输入；
+  没有特别指定窗口时，不需要考虑窗口和焦点状态，直接输入即可，后端程序会处理好焦点;
+  需要输入的文本直接放进 \`text\`。
+- \`open_app({ name: "" })\`
+  仅在目标应用当前没有现成窗口时使用。
+- \`send_shortcut({ shortcut: "ctrl+w" })\`
+  仅允许 \`cmd+w\`、\`ctrl+w\`、\`alt+f4\`。
+
+规则：
+- 只返回 JSON。
+- 如果不确定动作，返回空数组。
+
+请直接返回 JSON。
+`.trim()
+}
+
+function buildAudioIntentUserPrompt(windows) {
+  const windowSummary = buildWindowSummary(windows)
+
+  // 音频链路与文本链路共用同一套函数说明，只把输入来源换成音频。
+  return `
+输入来源：
+音频
+
+窗口列表：
+${windowSummary}
+
+可选函数：
+- \`focus_current()\`
+  适用于“切到当前窗口 / 聚焦当前窗口”这类没有明确目标窗口的指令。
+- \`close_current()\`
+  适用于“关闭这个窗口”这类没有明确目标窗口的指令。
+- \`focus_window({ id: "" })\`
+  适用于要聚焦某个具体窗口；必须从窗口列表里选 id，只传 \`id\`。
+  如果用户说“打开 A”，但窗口列表里已经有 A 的窗口，优先用这个函数，不要用 \`open_app\`。
+- \`close_window({ id: "" })\`
+  适用于要关闭某个具体窗口；必须从窗口列表里选 id，只传 \`id\`。
+- \`input_text({ text: "" })\`
+  适用于输入、回复、填写文本、把内容写到焦点输入框里；把最终文本直接放进 \`text\`。
+- \`open_app({ name: "" })\`
+  仅在目标应用当前没有现成窗口时使用。
+- \`send_shortcut({ shortcut: "ctrl+w" })\`
+  仅允许 \`cmd+w\`、\`ctrl+w\`、\`alt+f4\`。
+
+规则：
+- \`translate\` 必须精确填写你从音频里听到的文本精确原话原文，不要有任何修改。
+- 只返回 JSON。
+- 如果不确定动作，\`plan\` 返回空数组。
+
+请直接返回 JSON。
+`.trim()
 }
 
 function sanitizeLlmPlan(plan, windows) {
@@ -104,6 +190,32 @@ function sanitizeLlmPlan(plan, windows) {
   return sanitized
 }
 
+function finalizeIntentResult(raw, transcriptFallback, windows, parser) {
+  try {
+    const parsed = JSON.parse(raw)
+    const transcript = String(parsed.stt || transcriptFallback || '').trim()
+    const plan = sanitizeLlmPlan(parsed.plan, windows)
+
+    return {
+      transcript,
+      plan,
+      stt: transcript,
+      unmatchedSegments: plan.length > 0 ? [] : (transcript ? [transcript] : []),
+      safe: plan.length > 0,
+      parser,
+      raw,
+    }
+  } catch {
+    const fallback = parseActionsFromTranscript(transcriptFallback)
+    return {
+      ...fallback,
+      stt: transcriptFallback,
+      parser: 'fallback-rule',
+      raw,
+    }
+  }
+}
+
 export async function parseIntentWithWindows(commandText, windows) {
   const transcript = commandText.trim()
   if (!transcript) {
@@ -119,8 +231,7 @@ export async function parseIntentWithWindows(commandText, windows) {
   const client = createDashscopeClient()
   const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
 
-  const windowSummary = buildWindowSummary(windows)
-  const userPrompt = `返回 JSON：{"plan":[{"action":"...","args":{...}}],"stt":"..."}\n用户指令：${transcript}\n窗口：\n${windowSummary}\n函数：focus_current(), close_current(), focus_window({id:"W03"}), close_window({id:"W03"}), input_text({text:""}), open_app({name:""}), send_shortcut({shortcut:"ctrl+w"})\n规则：\n1. 只返回 JSON。\n2. 已有应用窗口时，“打开A”优先用 focus_window，不用 open_app。\n3. “关闭这个窗口/切到当前窗口”用 close_current / focus_current。\n4. 具体窗口只用 focus_window / close_window，args 里只放 id，优先 shortId。\n5. 输入、回复、填写文本都用 input_text，args.text 直接放最终内容。\n6. send_shortcut 只允许 cmd+w、ctrl+w、alt+f4。\n7. 不确定就返回空数组。`
+  const userPrompt = buildIntentUserPrompt(transcript, windows)
 
   logLlmPrompt('parseIntentWithWindows', userPrompt)
 
@@ -134,8 +245,7 @@ export async function parseIntentWithWindows(commandText, windows) {
     messages: [
       {
         role: 'system',
-        content:
-          '你是桌面动作解析器。你只能返回 JSON，不能解释。你只能从这些函数中选择：focus_current, close_current, focus_window, close_window, input_text, open_app, send_shortcut。具体窗口动作必须从给定窗口列表里选择 id。输入文本一律使用 input_text，并提供 args.text。若无法确定，返回空数组。',
+        content: buildIntentSystemPrompt(),
       },
       {
         role: 'user',
@@ -147,37 +257,112 @@ export async function parseIntentWithWindows(commandText, windows) {
   const raw = completion.choices?.[0]?.message?.content?.trim() || ''
   logLlmResponse('parseIntentWithWindows', raw)
 
-  try {
-    const parsed = JSON.parse(raw)
-    const plan = sanitizeLlmPlan(parsed.plan, windows)
-    if (plan.length === 0) {
-      const fallback = parseActionsFromTranscript(transcript)
-      if (fallback.plan.length > 0) {
-        return {
-          ...fallback,
-          stt: parsed.stt || transcript,
-          parser: 'fallback-after-empty-llm',
-          raw,
+  return finalizeIntentResult(raw, transcript, windows, 'llm')
+}
+
+export async function parseAudioIntentWithWindows(filePath, windows, options = {}) {
+  const client = createDashscopeClient()
+  const model = process.env.QWEN_MODEL || 'qwen3-omni-flash'
+  const stream = Boolean(options.stream)
+  const userPrompt = buildAudioIntentUserPrompt(windows)
+  const { uploadPath, format, converted } = await prepareAudioForUpload(path.resolve(filePath))
+
+  logLlmPrompt('parseAudioIntentWithWindows', {
+    prompt: userPrompt,
+    audioFilePath: path.resolve(filePath),
+    audioFormat: format,
+    convertedInputToWav: converted,
+    stream,
+  })
+
+  const requestStartedAt = Date.now()
+  let raw = ''
+  let usage = null
+  let firstTextLatencyMs = null
+
+  const requestPayload = {
+    model,
+    modalities: ['text'],
+    extra_body: {
+      enable_thinking: false,
+    },
+    messages: [
+      {
+        role: 'system',
+        content: buildIntentSystemPrompt(),
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_audio',
+            input_audio: {
+              data: buildAudioDataUrl(uploadPath, format),
+              format,
+            },
+          },
+          {
+            type: 'text',
+            text: userPrompt,
+          },
+        ],
+      },
+    ],
+  }
+
+  if (stream) {
+    // 流式模式只统计首字延迟，最终仍以完整 JSON 文本作为解析结果。
+    const completionStream = await client.chat.completions.create({
+      ...requestPayload,
+      stream: true,
+      stream_options: {
+        include_usage: true,
+      },
+    })
+
+    for await (const chunk of completionStream) {
+      if (Array.isArray(chunk.choices) && chunk.choices.length > 0) {
+        const content = typeof chunk.choices[0]?.delta?.content === 'string' ? chunk.choices[0].delta.content : ''
+        if (content) {
+          if (firstTextLatencyMs === null) {
+            firstTextLatencyMs = Date.now() - requestStartedAt
+          }
+          raw += content
         }
+        continue
+      }
+
+      if (chunk.usage) {
+        usage = chunk.usage
       }
     }
+  } else {
+    const completion = await client.chat.completions.create({
+      ...requestPayload,
+      stream: false,
+    })
 
-    return {
-      transcript,
-      plan,
-      stt: parsed.stt || transcript,
-      unmatchedSegments: plan.length > 0 ? [] : [transcript],
-      safe: plan.length > 0,
-      parser: 'llm',
-      raw,
-    }
-  } catch {
-    const fallback = parseActionsFromTranscript(transcript)
-    return {
-      ...fallback,
-      stt: transcript,
-      parser: 'fallback-rule',
-      raw,
-    }
+    raw = completion.choices?.[0]?.message?.content?.trim() || ''
+    usage = completion.usage ?? null
+    firstTextLatencyMs = Date.now() - requestStartedAt
+    logLlmResponse('parseAudioIntentWithWindows', completion)
+  }
+
+  if (stream) {
+    logLlmResponse('parseAudioIntentWithWindows', {
+      content: raw,
+      usage,
+    })
+  }
+
+  return {
+    ...finalizeIntentResult(raw, '', windows, 'llm-audio'),
+    usage,
+    timing: {
+      stream,
+      first_text_latency_ms: firstTextLatencyMs,
+      total_latency_ms: Date.now() - requestStartedAt,
+      converted_input_to_wav: converted,
+    },
   }
 }

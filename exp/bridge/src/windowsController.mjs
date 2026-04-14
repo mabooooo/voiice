@@ -17,11 +17,6 @@ const SHORTCUT_MAP = {
   'alt+f4': '%{F4}',
 }
 
-function escapeSendKeysLiteral(text) {
-  // SendKeys 对特殊字符敏感，这里转义为字面量，避免误触发快捷键。
-  return text.replace(/[+^%~(){}\[\]]/g, (char) => `{${char}}`)
-}
-
 function buildForegroundWindowScript() {
   return `
 Add-Type -TypeDefinition @"
@@ -63,11 +58,16 @@ Write-Output "close_current"
 }
 
 async function inputText(text) {
-  const escapedText = escapeSendKeysLiteral(text)
+  const encodedText = Buffer.from(String(text ?? ''), 'utf8').toString('base64')
   const script = `
+Add-Type -AssemblyName System.Windows.Forms
 $wshell = New-Object -ComObject WScript.Shell
-Start-Sleep -Milliseconds 120
-$wshell.SendKeys('${escapedText}')
+$text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedText}'))
+
+# 输入文本统一走剪贴板粘贴，避开逐字模拟输入在中文输入法下的偏差。
+[System.Windows.Forms.Clipboard]::SetText($text)
+Start-Sleep -Milliseconds 140
+$wshell.SendKeys('^v')
 Write-Output "input_text"
 `
 

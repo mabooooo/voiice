@@ -76,7 +76,7 @@ function WaitingView() {
   return (
     <div className="overlay-thinking-shell">
       <div className="overlay-thinking-tone" />
-      <div className="overlay-thinking-copy">Thinking</div>
+      <div className="overlay-thinking-copy">Brewing</div>
       <div className="overlay-thinking-mask" />
     </div>
   )

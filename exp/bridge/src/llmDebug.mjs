@@ -9,7 +9,7 @@ function printBlock(title, content) {
 
 // 只打印最终 prompt，避免把大体积请求体或音频 base64 打到控制台。
 export function logLlmPrompt(tag, prompt) {
-  printBlock(`${tag} prompt`, prompt)
+  // printBlock(`${tag} prompt`, prompt)
 }
 
 // 统一打印 LLM 响应，便于在终端中快速核对原始 content。

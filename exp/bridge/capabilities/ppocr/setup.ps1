@@ -53,11 +53,11 @@ else {
 Write-Step "Upgrade pip toolchain"
 & $PythonPath -m pip install --upgrade pip setuptools wheel
 
-Write-Step "Install PaddlePaddle runtime"
-& $PipPath install paddlepaddle
-
 Write-Step "Install PP-OCR runtime dependencies"
-& $PipPath install -r $RequirementsPath
+# 注意：paddleocr 3.0.3 / paddlex 3.0.3 只兼容 paddlepaddle 3.0.0。
+# 更高版本（如 3.3.x）会在 MKLDNN 路径上抛 ConvertPirAttribute2RuntimeAttribute 异常，
+# 迫使 enable_mkldnn=False，CPU OCR 会慢 5 倍以上。版本必须锁死在 requirements 里。
+& $PipPath install -r $RequirementsPath -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --extra-index-url https://pypi.org/simple
 
 Write-Step "Warm up PP-OCRv5 mobile models"
 $WarmupScript = @"

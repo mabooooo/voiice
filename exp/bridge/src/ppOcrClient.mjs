@@ -60,9 +60,5 @@ export async function testPPOcrWithImage(imagePath, options = {}) {
     serviceLatencySeconds: payload.latency ?? null,
     lineCount: payload.line_count ?? (Array.isArray(payload.ocr_lines) ? payload.ocr_lines.length : 0),
     ocrLines: payload.ocr_lines || [],
-    rawResult: payload.raw_result || null,
-    annotatedImageDataUrl: payload.annotated_image_base64
-      ? `data:image/png;base64,${payload.annotated_image_base64}`
-      : '',
   }
 }

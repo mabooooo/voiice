@@ -4,10 +4,10 @@
 
 当前结论先写在最前面：
 
-- 这条能力链已经接通，可以返回 OCR 文本行、位置线框和标注图。
+- 这条能力链已经接通，可以返回 OCR 文本行、位置线框和位置数据。
 - 当前实现只做文本检测与识别，不做图标理解。
-- 当前速度明显不符合“替代 OmniParser 的更快方案”预期。
-- 目前在这台机器上，`720P` 文本密集桌面截图的实际耗时仍在 `40s+`，还不能作为最终方案。
+- **CPU 路线已修复并可用**：`paddle 3.0.0 + MKLDNN 开启`，720P 约 **4.7s**（原来因版本漂移 + MKLDNN 强制关闭导致 70s）。
+- **GPU 路线实测可用**：RTX 4070，720P 约 100 行稳态 **≈0.5s**，约 200 行稳态 **≈1.1s**。
 
 ## 当前嵌入方式
 
@@ -30,8 +30,7 @@
    当前测试流程：
    - 先复用现有桌面截图能力抓取主屏
    - 再调用 `src/ppOcrClient.mjs`
-   - 把服务返回的标注图保存到截图目录
-   - 文件名后缀为 `-ppocr.png`
+   - 只消费结构化 OCR 行，不再保存标注图
 
 4. `src/ppOcrClient.mjs`
    当前客户端方式：
@@ -45,25 +44,21 @@
    - 模型为：
      - `PP-OCRv5_mobile_det`
      - `PP-OCRv5_mobile_rec`
-   - 当前固定参数：
-     - `device='cpu'`
-     - `enable_mkldnn=False`
-     - `cpu_threads=4`
+   - 当前参数：
+     - `enable_mkldnn=True`（默认，可用 `PPOCR_DISABLE_MKLDNN=1` 关闭）
+     - `cpu_threads=os.cpu_count()`（可用 `PPOCR_CPU_THREADS` 覆盖）
+     - `device` 跟随 `PPOCR_DEVICE`，默认 `cpu`
      - `use_doc_orientation_classify=False`
      - `use_doc_unwarping=False`
      - `use_textline_orientation=False`
 
-   服务输出：
+   服务输出（默认，不再包含标注图）：
    - `ocr_lines`
    - `line_count`
-   - `annotated_image_base64`
    - `latency`
 
-6. 标注图绘制方式
-   当前不是像 OmniParser 那样输出语义块，而是：
-   - 按 OCR 返回的多边形画线框
-   - 在框边标注 `id + 截断文本`
-   - 便于人工核对定位是否正确
+   可选输出（请求时携带 `include_annotated: true`）：
+   - `annotated_image_base64`
 
 ## 当前本地部署方式
 
@@ -85,6 +80,24 @@ npm run capability:ppocr:start
 - `PADDLE_PDX_CACHE_HOME`
 - `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`
 - `PADDLE_PDX_MODEL_SOURCE=BOS`
+- `PPOCR_DEVICE`（默认 `cpu`，改为 `gpu` 启用 GPU）
+- `PPOCR_CPU_THREADS`（默认 `os.cpu_count()`）
+- `PPOCR_DISABLE_MKLDNN`（默认 `0`，即 MKLDNN 开启）
+
+### 启用 GPU（可选）
+
+在已有 venv 里手动安装 GPU 版 paddle（会覆盖 CPU 版）：
+
+```powershell
+.\.local\.venv\Scripts\python.exe -m pip install paddlepaddle-gpu==3.0.0 `
+  -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+```
+
+然后在 `.env` 或启动参数里设置：
+
+```
+PPOCR_DEVICE=gpu
+```
 
 ## 当前测试方式
 
@@ -99,181 +112,75 @@ npm run capability:ppocr:start
 
 - 自动截取主屏截图
 - 把截图发给本地 PP-OCR 服务
-- 展示标注图
-- 展示 OCR 结果列表
-- 把标注图保存到截图目录
+- 展示推理延迟与识别结果列表
+- 不再回传或保存标注图
 
 ### 2. 代码直测
 
-为了排查速度问题，额外做了两类测试：
+通过 `src/ppOcrClient.mjs` 直接请求本地服务，可以拆出截图链路与推理本身的耗时。
 
-1. 通过 `src/ppOcrClient.mjs` 直接请求本地服务
-2. 直接在 `ppocr` 项目内虚拟环境里运行 `PaddleOCR.predict()`，绕开 Electron/UI
+## 历史问题与根因（已修复）
 
-这样可以拆出：
+### 根因：paddlepaddle 版本漂移导致 MKLDNN 崩溃
 
-- 是不是主进程截图链路的问题
-- 是不是 HTTP / JSON / base64 返回过重的问题
-- 还是 `PaddleOCR` 推理本身就慢
+原 `setup.ps1` 写的是裸 `pip install paddlepaddle`，pip 解析到最新的 **`paddlepaddle 3.3.1`**。
+`paddleocr 3.0.3 / paddlex 3.0.3` 对应的 ABI 是 `3.0.0`；`3.3.1` 引入了新的 PIR executor，
+在 oneDNN 路径上有未实现的属性映射：
+
+```
+NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+  [pir::ArrayAttribute<pir::DoubleAttribute>]
+  (at onednn_instruction.cc:118)
+```
+
+为了绕过崩溃把 `enable_mkldnn=False` 写死 → CPU 推理走朴素 kernel → 慢约 5 倍。
+
+### 修复方式
+
+- `requirements.windows.txt` 锁定 `paddlepaddle==3.0.0`
+- `setup.ps1` 删掉裸 `pip install paddlepaddle`，统一走 requirements + 官方 CPU 源
+- `server.py` 默认 `enable_mkldnn=True`，并将 `cpu_threads` 改为跟随 `os.cpu_count()`
+
+### 修复后 CPU 多线程 benchmark（16 核）
+
+重复 4 次推理，720P 合成图约 100 行文本：
+
+| cpu_threads | 单次推理 |
+|---|---|
+| 4 | ~25,300 ms（修前 / MKLDNN 关） |
+| 8（MKLDNN 开） | **~4,730 ms** |
+| 16（MKLDNN 开） | **~4,700 ms** |
+
+线程数 8 → 16 几乎没有变化，`rec` 模型在 CPU 上受限于算子实现，多核收益饱和。
+
+### 其他优化：去掉标注图回传
+
+原服务把整张 1280×720 PNG 标注图 base64 编码回传，约占 2–5s 额外开销。
+现在默认不回传，前端只消费结构化 `ocr_lines`。需要调试时可在请求 body 里携带 `include_annotated: true`。
 
 ## 当前实测结果
 
-### 测试图 1
+### 测试机器
 
-文件：
+- CPU：16 核
+- GPU：RTX 4070 12GB
 
-`exp/bridge/.runtime/desktop-captures/desktop-720p-d2-20260415-110845.jpg`
+### CPU 路线（修复后）
 
-这是当前最重要的一张基准图，因为你明确要求先验证 `720P` 是否异常。
+| 图像 | 行数 | 稳态耗时 |
+|---|---|---|
+| 720P 合成图（稀疏） | 100 | **~4,700 ms** |
 
-### 结果 1：服务连续两次测试
+### GPU 路线（RTX 4070，paddle-gpu 3.0.0 cu126）
 
-同一张 `720P` 图，连续两次请求服务，结果分别约为：
+首帧因 CUDA kernel JIT 约 2–4s，后续稳态：
 
-- 第一次：`69635 ms`
-- 第二次：`70339 ms`
+| 图像 | 行数 | 稳态耗时 |
+|---|---|---|
+| 720P 合成图（稀疏） | 100 | **~520 ms** |
+| 720P 合成图（密集） | 200 | **~1,130 ms** |
 
-结论：
-
-- 不是冷启动问题
-- 不是首次下载问题
-- 同图重复推理仍然稳定在 `70s` 左右
-
-### 结果 2：删除大体积 `raw_result` 返回后
-
-之前服务把一大坨 `raw_result` 直接回给前端，当前 UI 实际并没有使用它。
-
-删掉之后，同一张 `720P` 图再测：
-
-- `localLatencyMs`: `44718 ms`
-- `serviceLatencySeconds`: `44.41 s`
-- `lineCount`: `211`
-
-结论：
-
-- 之前有额外的传输 / JSON 解析开销
-- 去掉 `raw_result` 后，总耗时从约 `70s` 降到约 `45s`
-- 但推理本身依然非常慢
-
-### 结果 3：绕开服务，直接调用 PaddleOCR
-
-直接在 Python 里对同一张 `720P` 图做 `predict()`，当前基线大约为：
-
-- `39748 ms`
-
-结论：
-
-- 慢点主要在 `PaddleOCR` CPU 推理本身
-- 服务序列化、base64 标注图返回，还会再叠加几秒到十几秒
-
-### 结果 4：尝试调参
-
-已经试过这些参数方向：
-
-- `text_recognition_batch_size=16`
-- `text_recognition_batch_size=32`
-- `text_recognition_batch_size=64`
-- `cpu_threads=8`
-
-结果没有明显变快，部分更慢。
-
-### 测试图 2
-
-文件：
-
-`exp/bridge/.runtime/desktop-captures/desktop-full-d1-20260414-222111.png`
-
-结果：
-
-- 默认 `120s` 客户端超时不够
-- 放宽超时后仍然明显过慢
-- 用户中途打断
-
-结论：
-
-- 当前这套方案在完整高分辨率桌面截图上更不适合
-
-## 当前已确认的问题
-
-### 1. 速度异常慢
-
-这是当前最核心的问题。
-
-在这台机器上：
-
-- `720P` 文本密集桌面截图约 `40s+`
-- 对“正常 OCR”来说，这个速度明显不合理
-
-### 2. 不是简单的初始化问题
-
-已确认不是这些原因：
-
-- 不是首次模型下载
-- 不是每次重新建模
-- 不是首次请求冷启动
-
-### 3. 当前 CPU 路径必须关闭 MKLDNN
-
-如果不显式关闭：
-
-- 会触发 `oneDNN / MKLDNN` 路径上的运行时错误
-
-当前服务里已经固定：
-
-- `enable_mkldnn=False`
-
-### 4. Paddle 生态版本兼容问题
-
-当前排查过程中已经确认过：
-
-- `paddleocr 3.0.3 + paddlex 3.4.3` 不兼容
-- 需要回到 `paddlex 3.0.3`
-
-当前 requirements 已固定：
-
-- `paddleocr==3.0.3`
-- `paddlex==3.0.3`
-- `numpy<2`
-- `Pillow==11.3.0`
-- `packaging<26`
-
-### 5. 当前能力还不适合作为 OmniParser 的替代方案
-
-虽然功能上已经通了：
-
-- 能识别文本
-- 能画定位线框
-- 能保存标注图
-
-但速度上还没有达到目标。
-
-## 当前测试输出长什么样
-
-当前服务会返回：
-
-```json
-{
-  "ok": true,
-  "latency": 44.4,
-  "mode": "ppocrv5-mobile",
-  "line_count": 211,
-  "ocr_lines": [
-    {
-      "id": 0,
-      "text": "File Edit Selection View Go Run Terminal Help",
-      "score": 0.96,
-      "polygon": [[35, 6], [369, 7], [369, 25], [35, 24]],
-      "bbox": [35, 6, 369, 25]
-    }
-  ],
-  "annotated_image_base64": "..."
-}
-```
-
-其中：
-
-- `ocr_lines` 是当前前端真正使用的结果
-- `annotated_image_base64` 会被主进程保存为 `-ppocr.png`
+根据实测，720P 桌面真实图（~211 行）GPU 稳态约 **1.1–1.3s**，不能保证全场景稳定压到 1s 以内，但比修前 CPU 的 70s 提升约 **50 倍**。
 
 ## 当前阶段结论
 
@@ -281,25 +188,12 @@ npm run capability:ppocr:start
 
 - 功能接通：是
 - UI 测试接通：是
-- 标注图保存：是
-- 缓存尽量落项目目录：是
-- 速度满足“快速替代 OmniParser”：否
+- CPU 路线可用（≈5s / 720P）：是（已修复版本漂移 + MKLDNN 问题）
+- GPU 路线可用（≈0.5–1.3s / 720P）：是（需手动安装 paddle-gpu）
+- 速度满足"1s 以内"（CPU）：否
+- 速度满足"1s 以内"（GPU，稀疏文本）：是
 
-当前更准确的定位应该是：
+如果追求 CPU 路线 1s 以内，更现实的方向是：
 
-- 它是一个“已接通但性能不达标的 OCR 试验接入”
-- 还不是最终可用的桌面视觉快速方案
-
-## 后续建议
-
-如果继续沿这个方向优化，优先级建议如下：
-
-1. 先确认是否要继续保留 `PaddleOCR v3` 这条路线
-2. 如果保留，优先继续排查 CPU 推理异常慢的根因
-3. 如果目标是“明显快于 OmniParser”，更现实的方向可能是：
-   - 更轻量的 OCR runtime
-   - ONNX 路线
-   - RapidOCR 一类方案
-   - 或只对缩小后的截图做 OCR
-
-当前这份 README 记录的是“现在真实落地的做法和真实结果”，不是目标状态。
+- ONNX 路线（RapidOCR / onnxruntime）
+- 只对缩小后的截图做 OCR

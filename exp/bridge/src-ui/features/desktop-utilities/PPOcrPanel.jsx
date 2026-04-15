@@ -66,7 +66,7 @@ export function PPOcrPanel({ onLog }) {
         ready: true,
         baseURL: nextResult.baseURL || current.baseURL,
       }))
-      onLog?.(`PP-OCR 测试完成：识别 ${nextResult.lineCount} 行文本，截图 ${nextResult.capture?.targetDisplay?.savedPath || nextResult.imagePath}，标注图 ${nextResult.annotatedImagePath || '未保存'}`)
+      onLog?.(`PP-OCR 测试完成：识别 ${nextResult.lineCount} 行文本，截图 ${nextResult.capture?.targetDisplay?.savedPath || nextResult.imagePath}`)
     } catch (error) {
       onLog?.(`PP-OCR 测试失败: ${error.message || error}`)
     } finally {
@@ -102,20 +102,12 @@ export function PPOcrPanel({ onLog }) {
       {result ? (
         <div className="omniparser-grid">
           <article className="omniparser-card">
-            <div className="subpanel__title">识别截图</div>
-            {result.annotatedImageDataUrl ? (
-              <img className="omniparser-preview" src={result.annotatedImageDataUrl} alt="PP-OCR 标注结果" />
-            ) : (
-              <div className="helper-text">暂无标注图。</div>
-            )}
+            <div className="subpanel__title">识别摘要</div>
             <div className="helper-text">
               推理延迟：{formatLatency(result.serviceLatencySeconds)} · 本地总耗时：{result.localLatencyMs} ms
             </div>
             <div className="helper-text">
               文本行数：{result.lineCount} · 截图路径：{result.capture?.targetDisplay?.savedPath || result.imagePath}
-            </div>
-            <div className="helper-text">
-              标注图路径：{result.annotatedImagePath || '未保存'}
             </div>
           </article>
           <article className="omniparser-card">

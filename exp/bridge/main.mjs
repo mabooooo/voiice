@@ -679,17 +679,12 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:test-ppocr', async (_event, payload = {}) => {
     // PP-OCR 测试也固定抓取主屏，确保与 OmniParser 的对比基线一致。
+    // 当前不再让服务回传标注图，只消费结构化 OCR 行。
     const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
     const parseResult = await testPPOcrWithImage(targetDisplay.savedPath, payload)
-    const annotatedImagePath = await saveAnnotatedImageFromDataUrl(
-      parseResult.annotatedImageDataUrl,
-      targetDisplay.savedPath,
-      'ppocr',
-    )
 
     return {
       ...parseResult,
-      annotatedImagePath,
       capture: {
         outputDir: captureResult.outputDir,
         createdAt: captureResult.createdAt,

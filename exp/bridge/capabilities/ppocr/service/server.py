@@ -25,6 +25,9 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 from paddleocr import PaddleOCR
 
 
+DEFAULT_CPU_THREADS = max(os.cpu_count() or 4, 4)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Bridge PP-OCRv5 mobile local server")
     parser.add_argument("--host", default=os.environ.get("PPOCR_HOST", "127.0.0.1"))
@@ -32,6 +35,12 @@ def parse_args():
     parser.add_argument("--device", default=os.environ.get("PPOCR_DEVICE", "cpu"))
     parser.add_argument("--det-model-name", default=os.environ.get("PPOCR_DET_MODEL_NAME", "PP-OCRv5_mobile_det"))
     parser.add_argument("--rec-model-name", default=os.environ.get("PPOCR_REC_MODEL_NAME", "PP-OCRv5_mobile_rec"))
+    parser.add_argument("--cpu-threads", type=int, default=int(os.environ.get("PPOCR_CPU_THREADS", DEFAULT_CPU_THREADS)))
+    parser.add_argument(
+        "--disable-mkldnn",
+        action="store_true",
+        default=os.environ.get("PPOCR_DISABLE_MKLDNN", "").lower() in ("1", "true", "yes"),
+    )
     return parser.parse_args()
 
 
@@ -54,6 +63,8 @@ ensure_ready()
 
 class ParseRequest(BaseModel):
     base64_image: str
+    # 默认不再回传标注图，前端只需要结构化文本行；调试时可显式打开。
+    include_annotated: bool = False
 
 
 def encode_image_to_base64(image: Image.Image):
@@ -153,14 +164,16 @@ def extract_scores(raw_result):
 @lru_cache(maxsize=1)
 def get_ocr_model():
     # 这里只加载 PP-OCRv5 mobile，尽量把模型体积和推理延迟压低。
+    # MKLDNN 默认开启：关闭后 CPU OCR 会慢约 5 倍。曾经因 paddle 版本漂到 3.3.x 触发
+    # oneDNN PIR 属性转换异常被迫关闭，现在锁到 paddlepaddle==3.0.0 后已恢复。
     return PaddleOCR(
         text_detection_model_name=ARGS.det_model_name,
         text_recognition_model_name=ARGS.rec_model_name,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
-        enable_mkldnn=False,
-        cpu_threads=4,
+        enable_mkldnn=not ARGS.disable_mkldnn,
+        cpu_threads=ARGS.cpu_threads,
         device=ARGS.device,
     )
 
@@ -231,18 +244,22 @@ async def parse_image(request: ParseRequest):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
     started_at = time.time()
-    ocr_lines, raw_result = build_ocr_lines(image)
-    annotated = draw_ocr_overlay(image, ocr_lines)
-    latency = time.time() - started_at
+    ocr_lines, _ = build_ocr_lines(image)
+    inference_latency = time.time() - started_at
 
-    return {
+    response = {
         "ok": True,
-        "latency": latency,
+        "latency": inference_latency,
         "mode": "ppocrv5-mobile",
         "line_count": len(ocr_lines),
         "ocr_lines": ocr_lines,
-        "annotated_image_base64": encode_image_to_base64(annotated),
     }
+    if request.include_annotated:
+        # 可选调试通路：只在显式请求时付出整图 PNG+base64 的编码代价。
+        response["annotated_image_base64"] = encode_image_to_base64(
+            draw_ocr_overlay(image, ocr_lines)
+        )
+    return response
 
 
 if __name__ == "__main__":

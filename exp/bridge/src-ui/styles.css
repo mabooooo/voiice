@@ -594,6 +594,13 @@ textarea {
   transition: border-color 0.18s ease, background-color 0.18s ease;
 }
 
+.window-item-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
 .window-item--focused {
   border-color: #d4d4d8;
   background:
@@ -604,6 +611,11 @@ textarea {
 .window-item:hover {
   background: #17171b;
   border-color: #3f3f46;
+}
+
+.window-item__highlight-action {
+  align-self: stretch;
+  min-width: 74px;
 }
 
 .window-item__title {

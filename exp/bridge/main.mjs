@@ -76,6 +76,8 @@ const OVERLAY_MARGIN_BOTTOM = 28
 const CORNER_INDICATOR_SIZE = 300
 const CORNER_INDICATOR_DURATION_MS = 3000
 const CORNER_INDICATOR_BORDER = 8
+const WINDOW_HIGHLIGHT_DURATION_MS = 3000
+const WINDOW_HIGHLIGHT_BORDER = 4
 const SENSEVOICE_DEFAULT_BASE_URL = process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010'
 const SENSEVOICE_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'sensevoice')
 const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
@@ -88,10 +90,84 @@ function disposeIndicatorWindows() {
     indicatorResetTimer = null
   }
 
-  for (const win of indicatorWindows) {
-    if (!win.isDestroyed()) win.destroy()
+  for (const item of indicatorWindows) {
+    if (!item.window.isDestroyed()) item.window.destroy()
   }
   indicatorWindows = []
+}
+
+async function clearIndicatorWindows() {
+  if (indicatorResetTimer) {
+    clearTimeout(indicatorResetTimer)
+    indicatorResetTimer = null
+  }
+
+  // 常驻透明层只清空内容，不做 hide/show，避免系统窗口动画影响观感。
+  for (const item of indicatorWindows) {
+    if (!item.window.isDestroyed()) {
+      await item.window.webContents.executeJavaScript(
+        `window.renderIndicators(${JSON.stringify({ items: [] })})`,
+        true,
+      )
+    }
+  }
+}
+
+function buildIndicatorWindowHtml() {
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      #root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      .indicator {
+        position: absolute;
+        box-sizing: border-box;
+        background: transparent;
+      }
+      .indicator--corner {
+        border: ${CORNER_INDICATOR_BORDER}px solid #facc15;
+      }
+      .indicator--window {
+        border: ${WINDOW_HIGHLIGHT_BORDER}px solid #facc15;
+        box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.32);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      window.renderIndicators = function renderIndicators(payload) {
+        const root = document.getElementById('root')
+        if (!root) return false
+
+        const items = Array.isArray(payload && payload.items) ? payload.items : []
+        root.innerHTML = items.map((item) => {
+          const left = Math.round(item.left || 0)
+          const top = Math.round(item.top || 0)
+          const width = Math.max(0, Math.round(item.width || 0))
+          const height = Math.max(0, Math.round(item.height || 0))
+          const type = item.type === 'window' ? 'window' : 'corner'
+          return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;"></div>'
+        }).join('')
+
+        return items.length > 0
+      }
+    </script>
+  </body>
+</html>`
 }
 
 function buildIndicatorRects(display) {
@@ -111,46 +187,32 @@ function buildIndicatorRects(display) {
   ].map(item => ({
     left: Math.round(item.left),
     top: Math.round(item.top),
-    size,
+    width: size,
+    height: size,
   }))
 }
 
-function buildIndicatorHtml(display) {
-  const rects = buildIndicatorRects(display)
-  const squares = rects.map((rect) => {
-    return `<div class="indicator" style="left:${rect.left}px;top:${rect.top}px;width:${rect.size}px;height:${rect.size}px;"></div>`
-  }).join('')
-
-  return `<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <style>
-      html, body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        background: transparent;
-        overflow: hidden;
-        pointer-events: none;
-      }
-      .indicator {
-        position: absolute;
-        box-sizing: border-box;
-        border: ${CORNER_INDICATOR_BORDER}px solid #facc15;
-        background: transparent;
-      }
-    </style>
-  </head>
-  <body>
-    ${squares}
-  </body>
-</html>`
+function buildDisplaySignature(displays) {
+  return displays
+    .map((display) => `${display.id}:${display.bounds.x},${display.bounds.y},${display.bounds.width},${display.bounds.height}`)
+    .join('|')
 }
 
-async function showCornerIndicators() {
-  disposeIndicatorWindows()
+async function ensureIndicatorWindows() {
   const displays = screen.getAllDisplays()
+  const signature = buildDisplaySignature(displays)
+  const currentSignature = buildDisplaySignature(indicatorWindows.map((item) => item.display))
+  const needsRebuild =
+    indicatorWindows.length !== displays.length ||
+    currentSignature !== signature ||
+    indicatorWindows.some((item) => item.window.isDestroyed())
+
+  if (!needsRebuild) {
+    return indicatorWindows
+  }
+
+  disposeIndicatorWindows()
+
   const windows = displays.map((display) => {
     const indicatorWindow = new BrowserWindow({
       ...display.bounds,
@@ -167,6 +229,7 @@ async function showCornerIndicators() {
     })
 
     indicatorWindow.setIgnoreMouseEvents(true)
+    indicatorWindow.setAlwaysOnTop(true, 'screen-saver')
     indicatorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     return {
       display,
@@ -174,29 +237,150 @@ async function showCornerIndicators() {
     }
   })
 
-  // 每块屏幕只保留一个透明层窗口，内部绘制四个框，减少窗口数量与合成开销。
   await Promise.all(windows.map(async ({ display, window }) => {
-    const html = buildIndicatorHtml(display)
-    await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`)
+    // 每块屏幕只保留一个长期驻留的透明层，后续只更新内部 DOM，避免频繁创建销毁窗口。
+    void display
+    await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(buildIndicatorWindowHtml())}`)
+    window.showInactive()
   }))
 
+  indicatorWindows = windows
+  return indicatorWindows
+}
+
+function buildWindowHighlightRects(bounds, displays) {
+  return displays.map((display) => {
+    const left = Math.max(bounds.x, display.bounds.x)
+    const top = Math.max(bounds.y, display.bounds.y)
+    const right = Math.min(bounds.x + bounds.width, display.bounds.x + display.bounds.width)
+    const bottom = Math.min(bounds.y + bounds.height, display.bounds.y + display.bounds.height)
+
+    if (right <= left || bottom <= top) {
+      return {
+        displayId: display.id,
+        items: [],
+      }
+    }
+
+    return {
+      displayId: display.id,
+      items: [
+        {
+          type: 'window',
+          left: left - display.bounds.x,
+          top: top - display.bounds.y,
+          width: right - left,
+          height: bottom - top,
+        },
+      ],
+    }
+  })
+}
+
+async function renderIndicators(rectGroups, durationMs) {
+  const windows = await ensureIndicatorWindows()
+  const groupsByDisplayId = new Map(rectGroups.map((item) => [item.displayId, item.items]))
+
+  // 常驻透明层始终存在，这里只更新每块屏幕内部的高亮内容。
   for (const item of windows) {
-    item.window.showInactive()
+    const items = groupsByDisplayId.get(item.display.id) || []
+    await item.window.webContents.executeJavaScript(
+      `window.renderIndicators(${JSON.stringify({ items })})`,
+      true,
+    )
   }
 
-  indicatorWindows = windows.map(item => item.window)
   indicatorResetTimer = setTimeout(() => {
-    disposeIndicatorWindows()
-  }, CORNER_INDICATOR_DURATION_MS)
+    void clearIndicatorWindows()
+  }, durationMs)
+}
 
+async function rebuildIndicatorWindows() {
+  // 显示器布局变化后立即后台重建，避免下一次点击才触发初始化延迟。
+  disposeIndicatorWindows()
+  await ensureIndicatorWindows()
+}
+
+async function showCornerIndicators() {
+  const displays = screen.getAllDisplays()
+  const rectGroups = displays.map((display) => ({
+    displayId: display.id,
+    items: buildIndicatorRects(display).map((item) => ({
+      ...item,
+      type: 'corner',
+    })),
+  }))
+
+  await renderIndicators(rectGroups, CORNER_INDICATOR_DURATION_MS)
   return {
     ok: true,
     displayCount: displays.length,
     indicatorCount: displays.length * 4,
-    overlayWindowCount: windows.length,
+    overlayWindowCount: displays.length,
     durationMs: CORNER_INDICATOR_DURATION_MS,
     size: CORNER_INDICATOR_SIZE,
   }
+}
+
+async function highlightWindowBounds(bounds) {
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+    throw new Error('窗口位置无效，无法高亮')
+  }
+
+  const displays = screen.getAllDisplays()
+  const rectGroups = buildWindowHighlightRects(bounds, displays)
+  const visibleCount = rectGroups.reduce((count, item) => count + item.items.length, 0)
+  if (visibleCount === 0) {
+    throw new Error('窗口当前不在任何显示器可见区域内')
+  }
+
+  await renderIndicators(rectGroups, WINDOW_HIGHLIGHT_DURATION_MS)
+  return {
+    ok: true,
+    displayCount: displays.length,
+    highlightedDisplayCount: visibleCount,
+    durationMs: WINDOW_HIGHLIGHT_DURATION_MS,
+    bounds,
+  }
+}
+
+// 窗口高亮优先复用前端刚拿到的 bounds，避免每次点击都重新做一次系统窗口枚举。
+async function highlightWindow(payload = {}) {
+  const directBounds = payload?.bounds
+  if (directBounds?.width > 0 && directBounds?.height > 0) {
+    if (payload?.state === 'minimized') {
+      throw new Error('最小化窗口无法直接高亮，请先恢复窗口')
+    }
+
+    return highlightWindowBounds(directBounds)
+  }
+
+  const handle = String(payload?.handle || payload?.shortId || '')
+  if (!handle) {
+    throw new Error('缺少窗口句柄，无法高亮')
+  }
+
+  // 先用主进程已有快照，只有命中失败时才回退到真实刷新，减少点击延迟。
+  let snapshot = await windowRegistry.listWindows()
+  let target = snapshot.items.find(
+    (item) => item.handle === handle || item.shortId === handle,
+  )
+
+  if (!target) {
+    snapshot = await windowRegistry.refreshSnapshot()
+    target = snapshot.items.find(
+      (item) => item.handle === handle || item.shortId === handle,
+    )
+  }
+
+  if (!target) {
+    throw new Error(`Window not found: ${handle}`)
+  }
+  if (target.state === 'minimized') {
+    throw new Error('最小化窗口无法直接高亮，请先恢复窗口')
+  }
+
+  return highlightWindowBounds(target.bounds)
 }
 
 function computeOverlayBounds(width, height) {
@@ -580,6 +764,17 @@ app.whenReady().then(async () => {
   })
   createWindow()
   createOverlayWindow()
+  await ensureIndicatorWindows()
+  // 指示层启动后立即预热，后续只改 DOM 内容，不再等首次点击才建窗口。
+  screen.on('display-added', () => {
+    rebuildIndicatorWindows().catch(() => {})
+  })
+  screen.on('display-removed', () => {
+    rebuildIndicatorWindows().catch(() => {})
+  })
+  screen.on('display-metrics-changed', () => {
+    rebuildIndicatorWindows().catch(() => {})
+  })
   await shortcutManager.start()
 
   ipcMain.handle('bridge:get-config-status', async () => {
@@ -696,6 +891,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:show-corner-indicators', async () => {
     return showCornerIndicators()
+  })
+
+  ipcMain.handle('bridge:highlight-window', async (_event, payload = {}) => {
+    return highlightWindow(payload)
   })
 
   ipcMain.handle('bridge:analyze-audio', async (_event, payload) => {

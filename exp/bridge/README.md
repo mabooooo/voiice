@@ -12,6 +12,7 @@
 - 在本地把转写文本匹配成白名单动作
 - 执行 Windows 桌面动作
 - 在开发者模式里执行多屏桌面截图，并可额外生成 `640P` 压缩截图落盘
+- 开发者模式窗口列表支持对指定窗口做本地边框高亮，默认 `3s` 后自动消失
 
 ## 安全边界
 
@@ -175,6 +176,7 @@ npm run start
 - 非流式模式更适合短语音指令场景
 - `cmd+w` 在 Windows 里会映射为 `Ctrl+W`
 - 当前桌面控制通过 Electron 主进程调用 PowerShell 完成
+- 窗口高亮使用长期驻留的透明、置顶、鼠标穿透 Electron 窗口，默认隐藏，仅在测试时短暂显示
 - 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
 - OmniParser 本地部署产物默认保存到 `exp/bridge/capabilities/omniparser/.local`
 - PP-OCR 本地部署产物默认保存到 `exp/bridge/capabilities/ppocr/.local`

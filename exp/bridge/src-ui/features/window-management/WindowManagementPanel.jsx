@@ -17,24 +17,35 @@ function formatFocusedWindowLabel(item) {
   return `${item.shortId} · ${item.appName || 'Unknown App'} - ${item.title}`
 }
 
-// 窗口列表中的单项卡片只负责展示简要信息，并用视觉高亮标记当前焦点窗口。
-function WindowListItem({ item, onOpen }) {
+// 窗口列表中的单项拆成详情入口和高亮入口，避免一个点击动作绑定多种行为。
+function WindowListItem({ item, onOpen, onHighlight, highlightBusy }) {
   return (
-    <button
-      type="button"
-      className={`window-item ${item.isFocused ? 'window-item--focused' : ''}`}
-      onClick={() => onOpen(item.handle)}
-    >
-      <span className="window-item__title">
-        <span className="window-item__short-id">{item.shortId}</span>
-        <span>{item.appName || 'Unknown App'} - {item.title}</span>
-      </span>
-      <span className="window-item__meta">{item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}</span>
-      <span className="window-item__meta">
-        state: {item.state || 'unknown'}
-        {item.isFocused ? <span className="window-item__focus-badge">当前焦点</span> : null}
-      </span>
-    </button>
+    <div className="window-item-row">
+      <button
+        type="button"
+        className={`window-item ${item.isFocused ? 'window-item--focused' : ''}`}
+        onClick={() => onOpen(item.handle)}
+      >
+        <span className="window-item__title">
+          <span className="window-item__short-id">{item.shortId}</span>
+          <span>{item.appName || 'Unknown App'} - {item.title}</span>
+        </span>
+        <span className="window-item__meta">{item.bounds?.x},{item.bounds?.y} · {item.bounds?.width}x{item.bounds?.height}</span>
+        <span className="window-item__meta">
+          state: {item.state || 'unknown'}
+          {item.isFocused ? <span className="window-item__focus-badge">当前焦点</span> : null}
+        </span>
+      </button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="window-item__highlight-action"
+        onClick={() => onHighlight(item)}
+        disabled={highlightBusy}
+      >
+        {highlightBusy ? '高亮中...' : '高亮'}
+      </Button>
+    </div>
   )
 }
 
@@ -46,6 +57,7 @@ export function WindowManagementPanel({ onLog }) {
   const [windowBusy, setWindowBusy] = useState(false)
   const [automationBusy, setAutomationBusy] = useState(false)
   const [windowAutomation, setWindowAutomation] = useState(null)
+  const [highlightingHandle, setHighlightingHandle] = useState('')
 
   useEffect(() => {
     refreshWindows()
@@ -88,6 +100,26 @@ export function WindowManagementPanel({ onLog }) {
       appendWindowLog(`读取窗口详情失败: ${error.message || error}`)
     } finally {
       setWindowBusy(false)
+    }
+  }
+
+  // 窗口高亮每次都交给主进程重新取位置信息，避免列表坐标已经过期。
+  async function highlightWindow(item) {
+    if (!item?.handle) return
+
+    setHighlightingHandle(item.handle)
+    try {
+      const result = await window.bridgeApi.highlightWindow({
+        handle: item.handle,
+        shortId: item.shortId,
+        state: item.state,
+        bounds: item.bounds,
+      })
+      appendWindowLog(`窗口高亮完成: ${item.shortId}，${result.durationMs}ms 后自动隐藏。`)
+    } catch (error) {
+      appendWindowLog(`窗口高亮失败: ${error.message || error}`)
+    } finally {
+      setHighlightingHandle('')
     }
   }
 
@@ -172,7 +204,13 @@ export function WindowManagementPanel({ onLog }) {
         <ScrollArea className="window-list">
           <div className="list-stack">
             {windowSnapshot.items.map((item) => (
-              <WindowListItem key={item.handle} item={item} onOpen={openWindowDetail} />
+              <WindowListItem
+                key={item.handle}
+                item={item}
+                onOpen={openWindowDetail}
+                onHighlight={highlightWindow}
+                highlightBusy={highlightingHandle === item.handle}
+              />
             ))}
           </div>
         </ScrollArea>

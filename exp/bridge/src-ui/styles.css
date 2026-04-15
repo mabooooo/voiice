@@ -536,6 +536,34 @@ textarea {
   word-break: break-all;
 }
 
+.omniparser-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.omniparser-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 6px);
+  background: #101012;
+  padding: 12px;
+}
+
+.omniparser-preview {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid #232326;
+  background: #0b0b0d;
+  object-fit: contain;
+}
+
+.omniparser-result-scroll {
+  max-height: 420px;
+}
+
 .window-item {
   display: grid;
   gap: 4px;
@@ -1029,5 +1057,9 @@ textarea {
   .ui-dialog__footer {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .omniparser-grid {
+    grid-template-columns: 1fr;
   }
 }

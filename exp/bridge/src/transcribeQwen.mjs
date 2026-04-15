@@ -102,8 +102,6 @@ export async function transcribeCommandAudio(filePath, options = {}) {
     provider,
     model: config.model,
     prompt,
-    // 这里补充根层请求字段，方便确认 Xiaomi 的 thinking 配置是否已带上。
-    requestBodyExtensions: bodyExtensions,
   })
   logLlmRequest('transcribeQwen', requestPayload)
 

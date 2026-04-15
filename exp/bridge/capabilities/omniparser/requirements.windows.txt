@@ -1,0 +1,8 @@
+easyocr
+ultralytics==8.3.70
+numpy==1.26.4
+opencv-python-headless
+fastapi
+uvicorn
+pillow
+huggingface_hub

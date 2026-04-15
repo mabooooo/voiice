@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 
 import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
+import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
@@ -269,6 +270,41 @@ async function executeBridgePlan(plan) {
   }
 }
 
+async function capturePrimaryDesktopForOmniParser(payload = {}) {
+  // OmniParser 测试固定抓取主屏，避免多屏结果混在一起影响调试判断。
+  const captureResult = await captureDesktopScreenshots({
+    outputDir: runtimeScreenshots,
+    compressed: payload.compressed ?? true,
+    maxHeight: payload.maxHeight ?? 1080,
+  })
+  const targetDisplay = captureResult.items.find(item => item.isPrimary) || captureResult.items[0]
+  if (!targetDisplay) {
+    throw new Error('当前没有可用于 OmniParser 测试的桌面截图。')
+  }
+
+  return {
+    captureResult,
+    targetDisplay,
+  }
+}
+
+async function saveOmniParserAnnotatedImage(imageDataUrl, sourceImagePath) {
+  // 把服务返回的标注图回写到截图目录，便于后续人工复核与留档。
+  if (!imageDataUrl) {
+    return ''
+  }
+
+  const [meta, base64Payload] = String(imageDataUrl).split(',', 2)
+  if (!meta?.startsWith('data:image/') || !base64Payload) {
+    throw new Error('OmniParser 标注图格式无效，无法保存到本地。')
+  }
+
+  const parsedPath = path.parse(sourceImagePath)
+  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}-omniparser.png`)
+  await fsPromises.writeFile(outputPath, Buffer.from(base64Payload, 'base64'))
+  return outputPath
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -353,6 +389,9 @@ app.whenReady().then(async () => {
       baseUrl: process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: process.env.QWEN_MODEL || 'qwen3-omni-flash',
       providers: listProviderStatuses(),
+      omniparser: {
+        baseURL: process.env.OMNIPARSER_BASE_URL || 'http://127.0.0.1:8000',
+      },
       platform: process.platform,
       shortcut: shortcutManager.getState(),
     }
@@ -396,6 +435,30 @@ app.whenReady().then(async () => {
       compressed: Boolean(payload.compressed),
       maxHeight: payload.maxHeight ?? 720,
     })
+  })
+
+  ipcMain.handle('bridge:probe-omniparser', async (_event, payload = {}) => {
+    return probeOmniParser(payload)
+  })
+
+  ipcMain.handle('bridge:test-omniparser', async (_event, payload = {}) => {
+    const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
+    const parseResult = await testOmniParserWithImage(targetDisplay.savedPath, payload)
+    const annotatedImagePath = await saveOmniParserAnnotatedImage(
+      parseResult.somImageDataUrl,
+      targetDisplay.savedPath,
+    )
+
+    return {
+      ...parseResult,
+      annotatedImagePath,
+      capture: {
+        outputDir: captureResult.outputDir,
+        createdAt: captureResult.createdAt,
+        displayCount: captureResult.displayCount,
+        targetDisplay,
+      },
+    }
   })
 
   ipcMain.handle('bridge:show-corner-indicators', async () => {

@@ -9,6 +9,8 @@
     "build:renderer": "vite build --base=./",
     "start": "chcp 65001>nul && npm run build:renderer && electron .",
     "dev": "chcp 65001>nul && npm run build:renderer && electron .",
+    "capability:omniparser:setup": "powershell -ExecutionPolicy Bypass -File ./capabilities/omniparser/setup.ps1",
+    "capability:omniparser:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/omniparser/start.ps1",
     "smoke:matcher": "node ./scripts/smoke-matcher.mjs",
     "smoke:screenshot": "electron ./scripts/smoke-screenshot.mjs"
   },

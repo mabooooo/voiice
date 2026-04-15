@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   pickAudioFile: () => ipcRenderer.invoke('bridge:pick-audio-file'),
   saveRecording: (payload) => ipcRenderer.invoke('bridge:save-recording', payload),
   captureDesktopScreenshot: (payload) => ipcRenderer.invoke('bridge:capture-desktop-screenshot', payload),
+  probeOmniParser: (payload) => ipcRenderer.invoke('bridge:probe-omniparser', payload),
+  testOmniParser: (payload) => ipcRenderer.invoke('bridge:test-omniparser', payload),
   showCornerIndicators: () => ipcRenderer.invoke('bridge:show-corner-indicators'),
   analyzeAudio: (payload) => ipcRenderer.invoke('bridge:analyze-audio', payload),
   matchTranscript: (payload) => ipcRenderer.invoke('bridge:match-transcript', payload),

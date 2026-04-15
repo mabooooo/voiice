@@ -1,4 +1,21 @@
 # Changelog
+## 0.0.15 OmniParser 本地能力目录 + 开发者模式测试面板
+
+### Added
+
+- 新增 `capabilities/` 目录，作为 `bridge` 下统一承载本地能力部署脚本与适配层的入口。
+- 新增 `capabilities/omniparser`，包含本地部署说明、`setup.ps1`、`start.ps1` 与 FastAPI 适配服务。
+- 开发者模式新增 `OmniParser` 测试面板，可自动抓取主屏截图并调用本地 OmniParser 服务。
+- preload 与主进程新增 OmniParser 探活、主屏截图测试 IPC。
+
+### Changed
+
+- `.env.example` 新增 `OMNIPARSER_BASE_URL`，统一配置本地 OmniParser 服务地址。
+- README 补充本地能力目录规范与 OmniParser 部署步骤。
+- OmniParser 部署从 `conda + 官方仓库 + caption 权重` 调整为 `项目内 .venv + 项目内缓存 + 检测版服务`。
+- 当前 OmniParser 只使用新仓库里的 `icon_detect`，不再下载或依赖 `icon_caption_blip2 / icon_caption_florence`。
+- OmniParser 服务改为 `icon detect + OCR` 的轻量适配实现，依赖与缓存默认落在 `capabilities/omniparser/.local/` 下，尽量减少对 `C:` 盘的占用。
+
 ## 0.0.14 当前焦点窗口接入与窗口管理组件拆分 + 获取UI树 + safe json
 
 ### Added

@@ -250,10 +250,11 @@ async function ensureIndicatorWindows() {
 
 function buildWindowHighlightRects(bounds, displays) {
   return displays.map((display) => {
-    const left = Math.max(bounds.x, display.bounds.x)
-    const top = Math.max(bounds.y, display.bounds.y)
-    const right = Math.min(bounds.x + bounds.width, display.bounds.x + display.bounds.width)
-    const bottom = Math.min(bounds.y + bounds.height, display.bounds.y + display.bounds.height)
+    const sourceBounds = getDisplaySourceBounds(display)
+    const left = Math.max(bounds.x, sourceBounds.x)
+    const top = Math.max(bounds.y, sourceBounds.y)
+    const right = Math.min(bounds.x + bounds.width, sourceBounds.x + sourceBounds.width)
+    const bottom = Math.min(bounds.y + bounds.height, sourceBounds.y + sourceBounds.height)
 
     if (right <= left || bottom <= top) {
       return {
@@ -267,14 +268,35 @@ function buildWindowHighlightRects(bounds, displays) {
       items: [
         {
           type: 'window',
-          left: left - display.bounds.x,
-          top: top - display.bounds.y,
+          left: left - sourceBounds.x,
+          top: top - sourceBounds.y,
           width: right - left,
           height: bottom - top,
         },
       ],
     }
   })
+}
+
+function normalizeRectangle(bounds) {
+  return {
+    x: Math.round(Number(bounds?.x ?? 0)),
+    y: Math.round(Number(bounds?.y ?? 0)),
+    width: Math.max(0, Math.round(Number(bounds?.width ?? 0))),
+    height: Math.max(0, Math.round(Number(bounds?.height ?? 0))),
+  }
+}
+
+function getDisplaySourceBounds(display) {
+  const origin = display.nativeOrigin || display.bounds
+  return {
+    // 副屏的全局原点要按系统真实拼接位置取，不能直接复用 Electron 的 bounds.x/y。
+    x: Math.round(origin.x),
+    y: Math.round(origin.y),
+    // 当前高亮宽高已经正确，这里继续沿用逻辑尺寸，不再额外缩放。
+    width: Math.round(display.bounds.width),
+    height: Math.round(display.bounds.height),
+  }
 }
 
 async function renderIndicators(rectGroups, durationMs) {
@@ -328,7 +350,8 @@ async function highlightWindowBounds(bounds) {
   }
 
   const displays = screen.getAllDisplays()
-  const rectGroups = buildWindowHighlightRects(bounds, displays)
+  const normalizedBounds = normalizeRectangle(bounds)
+  const rectGroups = buildWindowHighlightRects(normalizedBounds, displays)
   const visibleCount = rectGroups.reduce((count, item) => count + item.items.length, 0)
   if (visibleCount === 0) {
     throw new Error('窗口当前不在任何显示器可见区域内')
@@ -340,7 +363,7 @@ async function highlightWindowBounds(bounds) {
     displayCount: displays.length,
     highlightedDisplayCount: visibleCount,
     durationMs: WINDOW_HIGHLIGHT_DURATION_MS,
-    bounds,
+    bounds: normalizedBounds,
   }
 }
 

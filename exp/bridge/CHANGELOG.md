@@ -1,4 +1,18 @@
 # Changelog
+## 0.0.17 PP-OCRv5 mobile 本地能力 + 开发者模式测试面板
+
+### Added
+
+- 新增 `capabilities/ppocr`，包含本地部署说明、`setup.ps1`、`start.ps1` 与 FastAPI 适配服务。
+- 开发者模式新增 `PP-OCRv5 Mobile` 测试面板，可自动抓取主屏截图并调用本地 OCR 服务。
+- preload 与主进程新增 PP-OCR 探活、主屏截图测试 IPC。
+- PP-OCR 标注图会回写到截图目录，文件名后缀为 `-ppocr.png`。
+
+### Changed
+
+- `main.mjs` 抽出通用标注图保存逻辑，OmniParser 与 PP-OCR 共用同一套截图落盘方式。
+- `.env.example` 与 README 补充 `PPOCR_BASE_URL`、部署步骤和能力目录说明。
+
 ## 0.0.16 SenseVoice Small 本地能力与并行识别
 
 ### Added

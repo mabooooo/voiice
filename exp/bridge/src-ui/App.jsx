@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { CornerIndicatorPanel } from '@/features/desktop-utilities/CornerIndicatorPanel'
 import { DesktopCapturePanel } from '@/features/desktop-utilities/DesktopCapturePanel'
 import { OmniParserPanel } from '@/features/desktop-utilities/OmniParserPanel'
+import { PPOcrPanel } from '@/features/desktop-utilities/PPOcrPanel'
 import { WindowManagementPanel } from '@/features/window-management/WindowManagementPanel'
 
 // 主控制台页面：负责串起音频输入、动作执行、窗口管理和设置页切换。
@@ -1063,6 +1064,7 @@ export function App() {
                 </div>
                 <DesktopCapturePanel onLog={appendLog} />
                 <OmniParserPanel onLog={appendLog} />
+                <PPOcrPanel onLog={appendLog} />
                 <section className="subpanel">
                   <div className="subpanel__title">Execution Log</div>
                   <ScrollArea className="subpanel__body subpanel__body--log"><pre className="console-block">{logs.join('\n')}</pre></ScrollArea>

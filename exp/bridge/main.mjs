@@ -11,6 +11,7 @@ import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
+import { probePPOcr, testPPOcrWithImage } from './src/ppOcrClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
@@ -479,19 +480,19 @@ async function capturePrimaryDesktopForOmniParser(payload = {}) {
   }
 }
 
-async function saveOmniParserAnnotatedImage(imageDataUrl, sourceImagePath) {
-  // 把服务返回的标注图回写到截图目录，便于后续人工复核与留档。
+// 视觉能力的标注图统一回写到截图目录，便于后续人工复核与对比。
+async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suffix) {
   if (!imageDataUrl) {
     return ''
   }
 
   const [meta, base64Payload] = String(imageDataUrl).split(',', 2)
   if (!meta?.startsWith('data:image/') || !base64Payload) {
-    throw new Error('OmniParser 标注图格式无效，无法保存到本地。')
+    throw new Error('视觉能力标注图格式无效，无法保存到本地。')
   }
 
   const parsedPath = path.parse(sourceImagePath)
-  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}-omniparser.png`)
+  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}-${suffix}.png`)
   await fsPromises.writeFile(outputPath, Buffer.from(base64Payload, 'base64'))
   return outputPath
 }
@@ -590,6 +591,9 @@ app.whenReady().then(async () => {
       omniparser: {
         baseURL: process.env.OMNIPARSER_BASE_URL || 'http://127.0.0.1:8000',
       },
+      ppocr: {
+        baseURL: process.env.PPOCR_BASE_URL || 'http://127.0.0.1:8020',
+      },
       sensevoice: {
         baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
         managed: managedSenseVoiceState,
@@ -643,6 +647,10 @@ app.whenReady().then(async () => {
     return probeOmniParser(payload)
   })
 
+  ipcMain.handle('bridge:probe-ppocr', async (_event, payload = {}) => {
+    return probePPOcr(payload)
+  })
+
   ipcMain.handle('bridge:probe-sensevoice', async (_event, payload = {}) => {
     await ensureManagedSenseVoiceServiceReady()
     return probeSenseVoice(payload)
@@ -651,9 +659,32 @@ app.whenReady().then(async () => {
   ipcMain.handle('bridge:test-omniparser', async (_event, payload = {}) => {
     const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
     const parseResult = await testOmniParserWithImage(targetDisplay.savedPath, payload)
-    const annotatedImagePath = await saveOmniParserAnnotatedImage(
+    const annotatedImagePath = await saveAnnotatedImageFromDataUrl(
       parseResult.somImageDataUrl,
       targetDisplay.savedPath,
+      'omniparser',
+    )
+
+    return {
+      ...parseResult,
+      annotatedImagePath,
+      capture: {
+        outputDir: captureResult.outputDir,
+        createdAt: captureResult.createdAt,
+        displayCount: captureResult.displayCount,
+        targetDisplay,
+      },
+    }
+  })
+
+  ipcMain.handle('bridge:test-ppocr', async (_event, payload = {}) => {
+    // PP-OCR 测试也固定抓取主屏，确保与 OmniParser 的对比基线一致。
+    const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
+    const parseResult = await testPPOcrWithImage(targetDisplay.savedPath, payload)
+    const annotatedImagePath = await saveAnnotatedImageFromDataUrl(
+      parseResult.annotatedImageDataUrl,
+      targetDisplay.savedPath,
+      'ppocr',
     )
 
     return {

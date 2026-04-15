@@ -1,0 +1,86 @@
+param(
+  [string]$PythonExe = "python",
+  [string]$Device = "cpu"
+)
+
+$ErrorActionPreference = "Stop"
+
+$CapabilityRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LocalRoot = Join-Path $CapabilityRoot ".local"
+$VenvRoot = Join-Path $LocalRoot ".venv"
+$PythonPath = Join-Path $VenvRoot "Scripts\python.exe"
+$PipPath = Join-Path $VenvRoot "Scripts\pip.exe"
+$RequirementsPath = Join-Path $CapabilityRoot "requirements.windows.txt"
+$CacheRoot = Join-Path $LocalRoot "cache"
+$PipCacheDir = Join-Path $CacheRoot "pip"
+$TempRoot = Join-Path $CacheRoot "tmp"
+$PaddleHome = Join-Path $CacheRoot "paddle"
+$PaddleXHome = Join-Path $CacheRoot "paddlex"
+
+function Write-Step {
+  param([string]$Message)
+  Write-Host ""
+  Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+Write-Step "Prepare local directories"
+New-Item -ItemType Directory -Force -Path $LocalRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $PipCacheDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TempRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $PaddleHome | Out-Null
+New-Item -ItemType Directory -Force -Path $PaddleXHome | Out-Null
+
+$env:PIP_CACHE_DIR = $PipCacheDir
+$env:TEMP = $TempRoot
+$env:TMP = $TempRoot
+$env:PADDLE_HOME = $PaddleHome
+$env:PADDLE_PDX_CACHE_HOME = $PaddleXHome
+$env:HOME = $LocalRoot
+$env:USERPROFILE = $LocalRoot
+$env:XDG_CACHE_HOME = $CacheRoot
+$env:PADDLE_PDX_MODEL_SOURCE = "BOS"
+$env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
+
+if (-not (Test-Path $PythonPath)) {
+  Write-Step "Create project-local venv"
+  & $PythonExe -m venv $VenvRoot
+}
+else {
+  Write-Step "Reuse project-local venv"
+}
+
+Write-Step "Upgrade pip toolchain"
+& $PythonPath -m pip install --upgrade pip setuptools wheel
+
+Write-Step "Install PaddlePaddle runtime"
+& $PipPath install paddlepaddle
+
+Write-Step "Install PP-OCR runtime dependencies"
+& $PipPath install -r $RequirementsPath
+
+Write-Step "Warm up PP-OCRv5 mobile models"
+$WarmupScript = @"
+from paddleocr import PaddleOCR
+
+# 通过一次轻量初始化预下载 det/rec 模型，避免首次点击测试时再走下载。
+ocr = PaddleOCR(
+    text_detection_model_name="PP-OCRv5_mobile_det",
+    text_recognition_model_name="PP-OCRv5_mobile_rec",
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False,
+    enable_mkldnn=False,
+    device="$Device",
+)
+print("Warmup complete:", type(ocr).__name__)
+"@
+$WarmupScriptPath = Join-Path $TempRoot "warmup-ppocr.py"
+Set-Content -Path $WarmupScriptPath -Value $WarmupScript -Encoding UTF8
+& $PythonPath $WarmupScriptPath
+Remove-Item -LiteralPath $WarmupScriptPath -Force -ErrorAction SilentlyContinue
+
+Write-Step "PP-OCR setup complete"
+Write-Host "Python: $PythonPath"
+Write-Host "Cache: $CacheRoot"
+Write-Host "Start script: $(Join-Path $CapabilityRoot 'start.ps1')"

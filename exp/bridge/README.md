@@ -58,6 +58,7 @@ XIAOMI_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 XIAOMI_MIMO_MODEL=mimo-v2-omni
 
 OMNIPARSER_BASE_URL=http://127.0.0.1:8000
+PPOCR_BASE_URL=http://127.0.0.1:8020
 SENSEVOICE_BASE_URL=http://127.0.0.1:8010
 SENSEVOICE_AUTOSTART=true
 SENSEVOICE_DEVICE=cpu
@@ -82,6 +83,7 @@ SENSEVOICE_DEVICE=cpu
 当前已接入：
 
 - `capabilities/omniparser`：本地 OmniParser 部署脚本、适配服务与说明文档
+- `capabilities/ppocr`：本地 PP-OCRv5 mobile 部署脚本、适配服务与说明文档
 - `capabilities/sensevoice`：本地 SenseVoice Small 部署脚本、适配服务与说明文档
 
 能力目录约束：
@@ -112,6 +114,28 @@ npm run capability:omniparser:start
 - 当前只使用新仓库里的 `icon_detect`
 - 当前不使用 `icon_caption_blip2 / icon_caption_florence`
 - 这里默认使用 `EasyOCR`，不安装 `PaddleOCR`
+
+## 本地部署 PP-OCRv5 Mobile
+
+首次部署：
+
+```powershell
+npm run capability:ppocr:setup
+```
+
+启动本地服务：
+
+```powershell
+npm run capability:ppocr:start
+```
+
+说明：
+
+- 默认使用项目内虚拟环境 `exp/bridge/capabilities/ppocr/.local/.venv`
+- 默认服务地址为 `http://127.0.0.1:8020`
+- 默认缓存目录为 `exp/bridge/capabilities/ppocr/.local/cache`
+- 当前只使用 `PP-OCRv5 mobile det + rec`
+- 开发者模式新增了 `PP-OCRv5 Mobile` 测试面板，可自动截取主屏并保存 OCR 标注图
 
 ## 本地部署 SenseVoice Small
 
@@ -153,6 +177,7 @@ npm run start
 - 当前桌面控制通过 Electron 主进程调用 PowerShell 完成
 - 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
 - OmniParser 本地部署产物默认保存到 `exp/bridge/capabilities/omniparser/.local`
+- PP-OCR 本地部署产物默认保存到 `exp/bridge/capabilities/ppocr/.local`
 - SenseVoice 本地部署产物默认保存到 `exp/bridge/capabilities/sensevoice/.local`
 - 当前界面为 React + Vite 构建产物，Electron 启动前会先构建 renderer
 - 后续可以把 `src/windowsController.mjs` 替换为 Go / Rust 守护进程 RPC

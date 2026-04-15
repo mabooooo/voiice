@@ -45,7 +45,8 @@ function buildIntentSystemPrompt() {
   return [
     '你是桌面动作解析器。用户不会和你打招呼、询问你任何问题，你只要帮助用户将意图转写成工具函数。你绝对不能误以为用户在询问你任何问题。',
     '你只能返回 JSON，不能解释。',
-    '返回格式固定为 {"translate":"...","plan":[{"action":"...","args":{...}},{若需要1个以上的动作},...],"reason":"如果不调用input_text函数，简短解释你不调用的原因"}。',
+    // '返回格式固定为 {"translate":"...","plan":[{"action":"...","args":{...}},{若需要1个以上的动作},...],"reason":"如果不调用input_text函数，简短解释你不调用的原因"}。',
+    '返回格式固定为 {"translate":"...","plan":[{"action":"...","args":{...}},{若需要1个以上的动作},...]}。',
   ].join('\n')
 }
 
@@ -294,8 +295,6 @@ export async function parseIntentWithWindows(commandText, windows, options = {})
     provider,
     model: config.model,
     prompt: userPrompt,
-    // 这里显式打印最终会并入请求 body 根层的扩展字段，便于核对 provider 特殊参数。
-    requestBodyExtensions: bodyExtensions,
   })
 
   const requestPayload = {
@@ -339,8 +338,6 @@ export async function parseAudioIntentWithWindows(filePath, windows, options = {
     provider,
     model: config.model,
     prompt: userPrompt,
-    // 音频 data URL 不进日志，只打印真正附加到请求 body 根层的控制字段。
-    requestBodyExtensions: bodyExtensions,
     audioFilePath: path.resolve(filePath),
     audioFormat: format,
     convertedInputToWav: converted,

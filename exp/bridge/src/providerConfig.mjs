@@ -61,6 +61,8 @@ export function buildProviderBodyExtensions(provider) {
   const normalizedProvider = normalizeProvider(provider)
   const bodyExtensions = {
     enable_thinking: false,
+    temperature: 0,
+    top_p: 0.7,
   }
 
   if (normalizedProvider === 'xiaomi') {

@@ -1,7 +1,7 @@
 :root {
   --background: #09090b;
   --foreground: #fafafa;
-  --card: #111113;
+  --card: #333333;
   --card-foreground: #fafafa;
   --muted: #18181b;
   --muted-foreground: #a1a1aa;
@@ -174,7 +174,7 @@ textarea {
 }
 
 .ui-card {
-  background: color-mix(in srgb, var(--card) 92%, transparent);
+  background: color-mix(in srgb, var(--card) 80%, transparent);
   color: var(--card-foreground);
   border: 1px solid var(--border);
   border-radius: var(--radius);

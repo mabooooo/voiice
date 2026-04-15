@@ -184,6 +184,7 @@ export function App() {
   })
   const [senseVoiceResult, setSenseVoiceResult] = useState(createSenseVoiceResultState())
   const [localAsrTestBusy, setLocalAsrTestBusy] = useState(false)
+  const [localAsrTestRecording, setLocalAsrTestRecording] = useState(false)
   const [localAsrTestStream, setLocalAsrTestStream] = useState(false)
   const [localAsrTestUseVad, setLocalAsrTestUseVad] = useState(false)
   const [localAsrTestResult, setLocalAsrTestResult] = useState(createSenseVoiceResultState())
@@ -216,6 +217,8 @@ export function App() {
   const meterSourceRef = useRef(null)
   const meterDataRef = useRef(null)
   const meterLastPushRef = useRef(0)
+  const localAsrTestRecorderRef = useRef(null)
+  const localAsrTestMediaStreamRef = useRef(null)
 
   const canExecutePlan = plan.length > 0
   const renderedPlan = useMemo(() => formatJson(plan), [plan])
@@ -435,32 +438,21 @@ export function App() {
     void runSenseVoiceTranscription(filePath, { label: 'SenseVoice 并行本地识别' })
   }
 
-  // 开发者模式手动测试独立于产品链路，专门用于验证本地 ASR 参数组合。
-  async function testLocalAsr() {
-    let targetAudioPath = audioPath
-    if (!targetAudioPath) {
-      targetAudioPath = await pickAudioFile()
-    }
-
-    if (!targetAudioPath) {
-      appendLog('本地 ASR 测试已取消，未选择音频文件。')
-      return
-    }
-
-    setLocalAsrTestBusy(true)
+  // 本地 ASR 测试收口到单独方法，确保开发者录音链路不影响产品主流程。
+  async function transcribeLocalAsrTestFile(filePath, sessionOptions) {
     setLocalAsrTestResult(createSenseVoiceResultState({
       status: 'running',
       mode: 'sensevoice-small',
-      audioPath: targetAudioPath,
-      stream: localAsrTestStream,
-      useVad: localAsrTestUseVad,
+      audioPath: filePath,
+      stream: sessionOptions.stream,
+      useVad: sessionOptions.useVad,
     }))
 
     try {
       const result = await window.bridgeApi.transcribeSenseVoice({
-        filePath: targetAudioPath,
-        stream: localAsrTestStream,
-        useVad: localAsrTestUseVad,
+        filePath,
+        stream: sessionOptions.stream,
+        useVad: sessionOptions.useVad,
         chunkDurationMs: 600,
       })
       setLocalAsrTestResult(createSenseVoiceResultState({
@@ -470,7 +462,7 @@ export function App() {
         mode: result.mode || 'sensevoice-small',
         convertedToWav: Boolean(result.convertedToWav),
         error: '',
-        audioPath: result.audioPath || targetAudioPath,
+        audioPath: result.audioPath || filePath,
         stream: Boolean(result.stream),
         useVad: Boolean(result.useVad),
         chunks: Array.isArray(result.chunks) ? result.chunks : [],
@@ -483,14 +475,128 @@ export function App() {
         mode: 'sensevoice-small',
         convertedToWav: false,
         error: message,
-        audioPath: targetAudioPath,
+        audioPath: filePath,
+        stream: sessionOptions.stream,
+        useVad: sessionOptions.useVad,
+      }))
+      appendLog(`本地 ASR 测试失败: ${message}`)
+    }
+  }
+
+  // 开发者模式点击后直接开始听写，停止后再独立调用本地 ASR 服务。
+  async function startLocalAsrTestRecording() {
+    try {
+      if (localAsrTestRecorderRef.current?.state === 'recording') return
+      const currentDeviceId = selectedInputDeviceIdRef.current
+      const currentMicrophoneLabel = getSelectedMicrophoneLabel(currentDeviceId)
+      const sessionOptions = {
+        stream: localAsrTestStream,
+        useVad: localAsrTestUseVad,
+      }
+      const streamRef = await navigator.mediaDevices.getUserMedia({
+        // 本地 ASR 测试和主录音使用同一套输入约束，避免设备行为不一致。
+        audio: buildAudioConstraints(currentDeviceId),
+      })
+      refreshMicrophoneDevices(currentDeviceId)
+
+      const chunks = []
+      const mediaRecorder = new MediaRecorder(streamRef)
+      localAsrTestRecorderRef.current = mediaRecorder
+      localAsrTestMediaStreamRef.current = streamRef
+
+      if (isHeadsetMicrophoneLabel(currentMicrophoneLabel)) {
+        appendLog(`本地 ASR 测试当前使用耳机麦克风：${currentMicrophoneLabel}。若系统音量异常，建议改为系统默认输入或外置麦克风。`)
+      }
+
+      mediaRecorder.addEventListener('dataavailable', (event) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data)
+      })
+
+      mediaRecorder.addEventListener('stop', async () => {
+        try {
+          // 停止后先把录音落到临时文件，再复用现有本地 ASR IPC。
+          const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' })
+          const arrayBuffer = await blob.arrayBuffer()
+          const tempPath = await window.bridgeApi.saveRecording({
+            bytes: Array.from(new Uint8Array(arrayBuffer)),
+            mimeType: blob.type,
+          })
+          appendLog(`本地 ASR 听写录音已保存: ${tempPath}`)
+          await transcribeLocalAsrTestFile(tempPath, sessionOptions)
+        } catch (error) {
+          const message = String(error.message || error)
+          setLocalAsrTestResult(createSenseVoiceResultState({
+            status: 'error',
+            mode: 'sensevoice-small',
+            convertedToWav: false,
+            error: message,
+            stream: sessionOptions.stream,
+            useVad: sessionOptions.useVad,
+          }))
+          appendLog(`本地 ASR 听写处理失败: ${message}`)
+        } finally {
+          // 开发者测试自己的录音资源在这里独立回收，避免污染产品录音状态。
+          streamRef.getTracks().forEach((track) => track.stop())
+          if (localAsrTestRecorderRef.current === mediaRecorder) localAsrTestRecorderRef.current = null
+          if (localAsrTestMediaStreamRef.current === streamRef) localAsrTestMediaStreamRef.current = null
+          setLocalAsrTestRecording(false)
+          setLocalAsrTestBusy(false)
+        }
+      })
+
+      setLocalAsrTestResult(createSenseVoiceResultState({
+        status: 'recording',
+        mode: 'sensevoice-small',
+        stream: sessionOptions.stream,
+        useVad: sessionOptions.useVad,
+      }))
+      setLocalAsrTestRecording(true)
+      setLocalAsrTestBusy(false)
+      mediaRecorder.start()
+      appendLog(`本地 ASR 听写已开始，模式：${sessionOptions.stream ? '流式' : '非流式'}，VAD：${sessionOptions.useVad ? '开启' : '关闭'}。`)
+    } catch (error) {
+      const message = String(error.message || error)
+      setLocalAsrTestRecording(false)
+      setLocalAsrTestBusy(false)
+      setLocalAsrTestResult(createSenseVoiceResultState({
+        status: 'error',
+        mode: 'sensevoice-small',
+        convertedToWav: false,
+        error: message,
         stream: localAsrTestStream,
         useVad: localAsrTestUseVad,
       }))
-      appendLog(`本地 ASR 测试失败: ${message}`)
-    } finally {
-      setLocalAsrTestBusy(false)
+      appendLog(`本地 ASR 听写启动失败: ${message}`)
     }
+  }
+
+  // 再次点击按钮时只负责结束本次听写，识别逻辑在 stop 回调里继续执行。
+  function stopLocalAsrTestRecording() {
+    const activeRecorder = localAsrTestRecorderRef.current
+    const activeStream = localAsrTestMediaStreamRef.current
+    if (!activeRecorder || activeRecorder.state !== 'recording') return
+    setLocalAsrTestRecording(false)
+    setLocalAsrTestBusy(true)
+    setLocalAsrTestResult((current) => createSenseVoiceResultState({
+      ...current,
+      status: 'running',
+      mode: current.mode || 'sensevoice-small',
+      stream: current.stream,
+      useVad: current.useVad,
+    }))
+    activeRecorder.stop()
+    activeStream?.getTracks().forEach((track) => track.stop())
+    appendLog('本地 ASR 听写已结束，正在识别。')
+  }
+
+  // 开发者测试按钮是录音开关，不再要求用户先手动挑选音频文件。
+  async function toggleLocalAsrTestRecording() {
+    if (localAsrTestRecording) {
+      stopLocalAsrTestRecording()
+      return
+    }
+    if (localAsrTestBusy) return
+    await startLocalAsrTestRecording()
   }
 
   // 音频分析是录音和文件导入的公共收口，避免两条状态机分叉。
@@ -883,7 +989,7 @@ export function App() {
                   <div className="side-section__row">
                     <div className="subpanel__title">Local ASR Test</div>
                     <div className="desktop-capture-actions">
-                      <select className="ui-select local-asr-test__select" value={localAsrTestStream ? 'stream' : 'non-stream'} onChange={(event) => setLocalAsrTestStream(event.target.value === 'stream')}>
+                      <select className="ui-select local-asr-test__select" value={localAsrTestStream ? 'stream' : 'non-stream'} onChange={(event) => setLocalAsrTestStream(event.target.value === 'stream')} disabled={localAsrTestRecording || localAsrTestBusy}>
                         <option value="non-stream">非流式</option>
                         <option value="stream">流式</option>
                       </select>
@@ -891,17 +997,18 @@ export function App() {
                         type="button"
                         className={`ui-switch ${localAsrTestUseVad ? 'ui-switch--checked' : ''}`}
                         aria-pressed={localAsrTestUseVad}
+                        disabled={localAsrTestRecording || localAsrTestBusy}
                         onClick={() => setLocalAsrTestUseVad((current) => !current)}
                       >
                         <span className="ui-switch__thumb" />
                       </button>
-                      <Button variant="secondary" onClick={testLocalAsr} disabled={localAsrTestBusy}>
-                        {localAsrTestBusy ? '识别中...' : '测试本地 ASR'}
+                      <Button variant="secondary" onClick={toggleLocalAsrTestRecording} disabled={localAsrTestBusy && !localAsrTestRecording}>
+                        {localAsrTestRecording ? '结束听写' : (localAsrTestBusy ? '识别中...' : '开始听写')}
                       </Button>
                     </div>
                   </div>
                   <div className="helper-text">
-                    这是开发者独立测试入口，不绑定产品原有动作链路。
+                    这是开发者独立测试入口。点击后直接开始麦克风听写，再次点击结束并触发本地 ASR。
                   </div>
                   <div className="helper-text">
                     模式：{localAsrTestResult.stream ? '流式' : '非流式'} · VAD：{localAsrTestResult.useVad ? '开启' : '关闭'} · 状态：{localAsrTestResult.status}
@@ -910,7 +1017,10 @@ export function App() {
                     {localAsrTestResult.convertedToWav ? ' · 已转 wav' : ''}
                   </div>
                   <div className="helper-text">
-                    音频路径：{localAsrTestResult.audioPath || audioPath || '暂无'}
+                    听写状态：{localAsrTestRecording ? '录音中' : (localAsrTestBusy ? '识别中' : '空闲')}
+                  </div>
+                  <div className="helper-text">
+                    音频路径：{localAsrTestResult.audioPath || '暂无'}
                   </div>
                   <div className="helper-text">
                     产品并行状态：{senseVoiceEnabled ? (senseVoiceBusy ? '识别中' : senseVoiceResult.status) : '未启用'}
@@ -919,7 +1029,7 @@ export function App() {
                   <ScrollArea className="subpanel__body">
                     <pre className="console-block">{localAsrTestResult.stream
                       ? (formatSenseVoiceChunks(localAsrTestResult.chunks) + (localAsrTestResult.text ? `\n\nFinal:\n${localAsrTestResult.text}` : ''))
-                      : (localAsrTestResult.text || '点击上方按钮执行独立本地 ASR 测试。')}
+                      : (localAsrTestResult.text || '点击“开始听写”执行独立本地 ASR 测试。')}
                     </pre>
                   </ScrollArea>
                 </section>

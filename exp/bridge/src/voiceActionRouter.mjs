@@ -104,7 +104,7 @@ export function createVoiceActionRouter(deps) {
     state.timer = setTimeout(() => reset('timeout'), AWAIT_TIMEOUT_MS)
   }
 
-  async function handleTranscript(transcript) {
+  async function handleTranscript(transcript, options = {}) {
     const text = String(transcript || '').trim()
     if (!text) {
       return { handled: false, reason: 'empty' }
@@ -148,7 +148,8 @@ export function createVoiceActionRouter(deps) {
 
     let ocr
     try {
-      ocr = await deps.captureAndOcr()
+      // OCR 后端由设置页透传进来，便于在 PP-OCR 和 RapidOCR 之间切换。
+      ocr = await deps.captureAndOcr({ backend: options.backend })
     } catch (error) {
       log(`[voice] capture+ocr failed: ${error.message || error}`)
       deps.notifyOverlay?.({ status: 'executing', title: 'OCR 失败', subtitle: String(error.message || error), autoResetMs: 3500 })

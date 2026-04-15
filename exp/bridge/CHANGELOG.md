@@ -8,6 +8,8 @@
 - `src/windowsController.mjs` 新增白名单动作 `click_at {x,y}`，通过 `SetCursorPos + mouse_event` 执行物理像素级单击。
 - 主进程新增 `bridge:voice-handle-audio`、`bridge:voice-route-text`、`bridge:voice-reset` 与 `bridge:voice-log`，分别用于 ASR+FSM 路由、无麦调试、状态清理与日志推送。
 - preload 新增 `voiceHandleAudio / voiceRouteText / voiceReset / onVoiceLog` 暴露给渲染层。
+- 新增 `src/rapidOcrClient.mjs`，直接复用 `.runtime/rapidocr_test.py` 验证过的 Win 原生 OCR `detect + recognize` 链路，作为语音点选的可选快速后端。
+- 设置页新增“语音点选 OCR 后端”开关，可在 `RapidOCR` 与原有 `PP-OCR` 之间切换，且会持久化到本地存储。
 
 ### Changed
 
@@ -25,6 +27,8 @@
 - 语音点选在只有 `1` 个候选时会直接点击；只有候选数大于 `1` 时才进入确认态等待序号。
 - 编号徽章改为显示在候选框右侧，若超出屏幕右边缘则自动切换到左侧。
 - 候选框会在原有 OCR 框基础上居中外扩 `20px` padding，提升可见性与容错。
+- 右 `Alt` 触发的本地点选链路现在会按设置页选择切换 OCR 后端；默认仍保留原有 `PP-OCR`，切到 `RapidOCR` 后会直接调用本地测试脚本链路。
+- 语音耗时日志改为按实际后端输出 `capture completed` 与 `ppocr completed / rapidocr completed`，便于对比两条 OCR 链路的瓶颈位置。
 
 ### Notes
 

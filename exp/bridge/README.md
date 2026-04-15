@@ -14,7 +14,7 @@
 - 在开发者模式里执行多屏桌面截图，并可额外生成 `640P` 压缩截图落盘
 - 开发者模式窗口列表支持对指定窗口做本地边框高亮，默认 `3s` 后自动消失
 - 开发者模式窗口详情页支持单独截图当前窗口，并保存到本地截图目录
-- 支持基于 `SenseVoice + PP-OCR` 的本地点选式语音路由：先说“点击 xxx”，再说“第 N 个”
+- 支持基于 `SenseVoice + OCR` 的本地点选式语音路由：可在 `PP-OCR` 与 `RapidOCR` 之间切换，先说“点击 xxx”，再说“第 N 个”
 
 ## 安全边界
 
@@ -148,9 +148,9 @@ npm run capability:ppocr:start
 
 1. 右 `Alt` 开始录音
 2. 说“点击开发者模式”这类触发语句
-3. 松开后，主屏会执行一次原始 PNG 截图与 PP-OCR
+3. 松开后，主屏会执行一次原始 PNG 截图，并按设置页选择调用 `PP-OCR` 或 `RapidOCR`
 4. 命中的候选项会以带编号的青色框显示在对应屏幕上
-5. 再按右 `Alt` 说“3”或“第三个”
+5. 如果只命中 `1` 项，会直接点击；只有命中多项时才需要再说“3”或“第三个”
 6. 路由器会把编号映射为 `click_at({x,y})` 执行点击
 
 当前 FSM：
@@ -164,11 +164,13 @@ npm run capability:ppocr:start
 - 触发词支持：`点击 / 点一下 / 打开 / open / click + 关键词`
 - 序号支持：`1-9 / 一二三四五六七八九 / 第X个`
 - 候选筛选来自 OCR 行，按完整命中和短文本命中加权，最多保留 `9` 个
+- 候选框会围绕原 OCR 框居中外扩 `20px` padding，编号默认显示在右侧，若超出屏幕右边缘则切到左侧
+- 设置页提供“语音点选 OCR 后端”开关：关闭时走原有 `PP-OCR`，打开时走 `.runtime/rapidocr_test.py` 验证过的 `RapidOCR detect + recognize` 链路
 
 调试方式：
 
-- 有麦链路：按右 `Alt` 录“点击开发者模式” -> 候选框出现 -> 再说“第三个”
-- 无麦链路：在渲染进程 console 执行 `bridgeApi.voiceRouteText({ transcript: '点击开发者模式' })`
+- 有麦链路：按右 `Alt` 录“点击开发者模式” -> 若单候选则直接点击；若多候选则候选框出现 -> 再说“第三个”
+- 无麦链路：在渲染进程 console 执行 `bridgeApi.voiceRouteText({ transcript: '点击开发者模式', ocrBackend: 'rapidocr' })`
 - 状态重置：可调用 `bridgeApi.voiceReset()`
 
 ## 本地部署 SenseVoice Small
@@ -214,7 +216,7 @@ npm run start
 - 右 `Alt` 快捷键停止录音后的链路目前优先走本地 `SenseVoice + FSM`，云端 LLM 动作解析在该快捷键链路里暂时屏蔽
 - 手动文件分析和界面按钮触发的分析链路仍保持原有云端解析方式
 - 候选框 Overlay 使用逻辑像素；截图与点击落点使用物理像素，并通过 `display.nativeOrigin` 适配多显示器拼接
-- Execution Log 会订阅本地语音路由日志，便于观察候选筛选、状态切换和点击执行过程
+- Execution Log 当前主要用于查看关键语音链路状态；终端会保留 `capture completed` 与当前 OCR 后端的完成日志，例如 `ppocr completed / rapidocr completed`，便于排查 OCR 慢点
 - 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
 - OmniParser 本地部署产物默认保存到 `exp/bridge/capabilities/omniparser/.local`
 - PP-OCR 本地部署产物默认保存到 `exp/bridge/capabilities/ppocr/.local`

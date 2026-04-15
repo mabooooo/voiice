@@ -12,6 +12,7 @@ import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
 import { probePPOcr, testPPOcrWithImage } from './src/ppOcrClient.mjs'
+import { testRapidOcrWithImage } from './src/rapidOcrClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
@@ -101,6 +102,7 @@ const PPOCR_PYTHON_PATH = path.join(PPOCR_LOCAL_ROOT, '.venv', 'Scripts', 'pytho
 const PPOCR_SERVER_PATH = path.join(PPOCR_CAPABILITY_ROOT, 'service', 'server.py')
 // 1x1 透明像素 PNG，用于 PP-OCR 首次调用预热 lru_cache 里的模型。
 const WARMUP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
+const VOICE_OCR_BACKENDS = new Set(['ppocr', 'rapidocr'])
 
 function buildTimestampToken(date = new Date()) {
   const pad = value => String(value).padStart(2, '0')
@@ -113,6 +115,11 @@ function buildTimestampToken(date = new Date()) {
     pad(date.getMinutes()),
     pad(date.getSeconds()),
   ].join('')
+}
+
+function normalizeVoiceOcrBackend(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return VOICE_OCR_BACKENDS.has(normalized) ? normalized : 'ppocr'
 }
 
 function disposeIndicatorWindows() {
@@ -904,10 +911,10 @@ async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suff
   return outputPath
 }
 
-// 语音点击链路：截主屏原图 → 调 PP-OCR → 返回 OCR 行 + 坐标换算所需元数据。
-async function captureAndOcrPrimaryDisplay() {
+// 语音点击链路统一从这里切换 OCR 后端，返回同一套坐标换算元数据给路由器。
+async function captureAndOcrPrimaryDisplay(options = {}) {
+  const backend = normalizeVoiceOcrBackend(options.backend)
   const captureStartAt = Date.now()
-  await ensureManagedPPOcrServiceReady()
   const captureResult = await captureDesktopScreenshots({
     outputDir: runtimeScreenshots,
     compressed: false,
@@ -922,9 +929,17 @@ async function captureAndOcrPrimaryDisplay() {
   const scaleFactor = item.width / Math.max(1, logicalWidth)
   const origin = display.nativeOrigin || display.bounds
 
+  let parseResult
   const ocrStartAt = Date.now()
-  const parseResult = await testPPOcrWithImage(item.savedPath)
-  console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
+  if (backend === 'rapidocr') {
+    parseResult = await testRapidOcrWithImage(item.savedPath, options)
+    console.log(`[${new Date().toISOString()}] [voice] rapidocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
+  } else {
+    await ensureManagedPPOcrServiceReady()
+    parseResult = await testPPOcrWithImage(item.savedPath, options)
+    console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
+  }
+
   return {
     ocrLines: parseResult.ocrLines || [],
     lineCount: parseResult.lineCount || 0,
@@ -935,6 +950,7 @@ async function captureAndOcrPrimaryDisplay() {
     scaleFactor,
     originX: Math.round(origin.x),
     originY: Math.round(origin.y),
+    backend,
   }
 }
 
@@ -1102,6 +1118,10 @@ app.whenReady().then(async () => {
       ppocr: {
         baseURL: process.env.PPOCR_BASE_URL || 'http://127.0.0.1:8020',
       },
+      voiceOcr: {
+        backend: normalizeVoiceOcrBackend(process.env.VOICE_OCR_BACKEND),
+        supported: [...VOICE_OCR_BACKENDS],
+      },
       sensevoice: {
         baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
         managed: managedSenseVoiceState,
@@ -1237,14 +1257,18 @@ app.whenReady().then(async () => {
     await ensureManagedSenseVoiceServiceReady()
     const asr = await transcribeSenseVoiceAudio(payload.filePath, payload)
     const transcript = String(asr.text || '').trim()
-    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript) : { handled: false, reason: 'router-missing' }
+    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
+      backend: normalizeVoiceOcrBackend(payload.ocrBackend),
+    }) : { handled: false, reason: 'router-missing' }
     return { transcript, asr, routed, state: voiceRouter?.getState() }
   })
 
   ipcMain.handle('bridge:voice-route-text', async (_event, payload = {}) => {
     // 调试入口：直接喂文本给 FSM（跳过 ASR），方便无麦调试。
     const transcript = String(payload?.transcript || '').trim()
-    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript) : { handled: false, reason: 'router-missing' }
+    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
+      backend: normalizeVoiceOcrBackend(payload.ocrBackend),
+    }) : { handled: false, reason: 'router-missing' }
     return { transcript, routed, state: voiceRouter?.getState() }
   })
 

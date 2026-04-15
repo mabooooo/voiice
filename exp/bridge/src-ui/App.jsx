@@ -18,6 +18,7 @@ const STORAGE_KEYS = {
   microphoneId: 'voice-bridge-microphone-id',
   provider: 'voice-bridge-provider',
   senseVoiceEnabled: 'voice-bridge-sensevoice-enabled',
+  voiceOcrBackend: 'voice-bridge-voice-ocr-backend',
 }
 const PROVIDER_OPTIONS = [
   { value: 'qwen', label: 'Qwen' },
@@ -172,6 +173,7 @@ export function App() {
   const [audioPath, setAudioPath] = useState('')
   const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(STORAGE_KEYS.provider) || 'qwen')
   const [senseVoiceEnabled, setSenseVoiceEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.senseVoiceEnabled) === 'true')
+  const [voiceOcrBackend, setVoiceOcrBackend] = useState(() => localStorage.getItem(STORAGE_KEYS.voiceOcrBackend) || 'ppocr')
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
   const [timing, setTiming] = useState({})
@@ -227,6 +229,8 @@ export function App() {
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.activeMenu, activeMenu) }, [activeMenu])
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.provider, selectedProvider) }, [selectedProvider])
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.senseVoiceEnabled, String(senseVoiceEnabled)) }, [senseVoiceEnabled])
+  // 语音点选 OCR 后端单独持久化，便于在快速链路和兼容链路之间切换。
+  useEffect(() => { localStorage.setItem(STORAGE_KEYS.voiceOcrBackend, voiceOcrBackend) }, [voiceOcrBackend])
   useEffect(() => {
     selectedInputDeviceIdRef.current = selectedInputDeviceId
     localStorage.setItem(STORAGE_KEYS.microphoneId, selectedInputDeviceId)
@@ -280,6 +284,9 @@ export function App() {
     window.bridgeApi.getConfigStatus().then((status) => {
       setRuntimeConfig(status)
       setConfigStatus(formatJson(status))
+      if (!localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)) {
+        setVoiceOcrBackend(status.voiceOcr?.backend || 'ppocr')
+      }
       if (status.shortcut) {
         setShortcutState(status.shortcut)
         if (status.shortcut.shortcut) setShortcutDraft(status.shortcut.shortcut)
@@ -605,9 +612,9 @@ export function App() {
   // 右 Alt 链路专用：本地 ASR + 语音 FSM，不再走云端 LLM 动作解析。
   async function routeVoiceAudio(filePath) {
     if (!filePath) return
-    appendLog(`语音路由开始：${filePath}`)
+    appendLog(`语音路由开始：${filePath} · OCR=${voiceOcrBackend}`)
     try {
-      const result = await window.bridgeApi.voiceHandleAudio({ filePath })
+      const result = await window.bridgeApi.voiceHandleAudio({ filePath, ocrBackend: voiceOcrBackend })
       const transcript = result?.transcript || ''
       setTranscript(transcript)
       const phase = result?.state?.phase || 'idle'
@@ -905,6 +912,39 @@ export function App() {
             </div>
             <div className="helper-text">
               配置状态：{runtimeConfig?.providers?.[selectedProvider]?.configured ? '已配置 API Key' : '缺少 API Key'}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div><div className="section-label">Local OCR</div><CardTitle>语音点选 OCR 后端</CardTitle></div>
+            <CardDescription>右 Alt 语音点选链路可在 RapidOCR 和 PP-OCR 之间切换，手动 PP-OCR 面板不受这里影响。</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            <div className="settings-card">
+              <div className="settings-card__row">
+                <div className="settings-status">
+                  <span className={`settings-status__dot ${voiceOcrBackend === 'rapidocr' ? 'settings-status__dot--ok' : ''}`} />
+                  <span>{voiceOcrBackend === 'rapidocr' ? '当前使用 RapidOCR' : '当前使用 PP-OCR'}</span>
+                </div>
+                <button
+                  type="button"
+                  className={`ui-switch ${voiceOcrBackend === 'rapidocr' ? 'ui-switch--checked' : ''}`}
+                  aria-pressed={voiceOcrBackend === 'rapidocr'}
+                  onClick={() => setVoiceOcrBackend((current) => current === 'rapidocr' ? 'ppocr' : 'rapidocr')}
+                >
+                  <span className="ui-switch__thumb" />
+                </button>
+              </div>
+              <div className="helper-text">开关状态：{voiceOcrBackend === 'rapidocr' ? 'RapidOCR detect + recognize' : 'PP-OCR 本地服务'}</div>
+              <div className="helper-text">
+                支持后端：{Array.isArray(runtimeConfig?.voiceOcr?.supported) ? runtimeConfig.voiceOcr.supported.join(' / ') : 'ppocr / rapidocr'}
+              </div>
+              <div className="helper-text">
+                当前默认后端：{runtimeConfig?.voiceOcr?.backend || 'ppocr'}
+              </div>
+              <div className="helper-text">RapidOCR 复用 `capabilities/ppocr/.local/.venv` 内的本地模型依赖，不额外新增一套部署。</div>
             </div>
           </CardContent>
         </Card>

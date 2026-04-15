@@ -1,4 +1,22 @@
 # Changelog
+## 0.0.16 SenseVoice Small 本地能力与并行识别
+
+### Added
+
+- 新增 `capabilities/sensevoice`，包含 `SenseVoice Small` 的本地部署脚本、说明文档与 FastAPI 适配服务。
+- 新增 `capability:sensevoice:setup` 与 `capability:sensevoice:start` npm 脚本。
+- preload 与主进程新增 `SenseVoice` 探活、本地转写 IPC。
+- 设置页新增 `SenseVoice` 本地识别独立开关与服务检测入口。
+- 分析页新增本地 `SenseVoice` 转写结果与耗时展示。
+- Electron 启动时默认自动托管本机 `SenseVoice` 服务，并在退出时回收托管子进程。
+- 开发者模式新增独立的本地 ASR 测试面板，可切换 `流式 / 非流式`，并支持 `VAD` 开关。
+
+### Changed
+
+- 音频分析流程现在可以在原有云端动作解析继续执行的同时，并行触发一次本地 `SenseVoice` 识别。
+- `.env.example` 新增 `SENSEVOICE_BASE_URL / SENSEVOICE_AUTOSTART / SENSEVOICE_DEVICE`，统一配置本地 `SenseVoice` 服务地址、自动启动和推理设备。
+- 本地音频预处理增加 `force wav` 选项，减少不同识别后端对压缩音频格式的兼容差异。
+
 ## 0.0.15 OmniParser 本地能力目录 + 开发者模式测试面板
 
 ### Added

@@ -1,0 +1,6 @@
+numpy<=1.26.4
+sentencepiece==0.1.99
+funasr
+huggingface_hub[cli]
+fastapi
+uvicorn

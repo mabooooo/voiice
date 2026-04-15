@@ -16,6 +16,7 @@ const STORAGE_KEYS = {
   activeMenu: 'voice-bridge-active-menu',
   microphoneId: 'voice-bridge-microphone-id',
   provider: 'voice-bridge-provider',
+  senseVoiceEnabled: 'voice-bridge-sensevoice-enabled',
 }
 const PROVIDER_OPTIONS = [
   { value: 'qwen', label: 'Qwen' },
@@ -42,6 +43,31 @@ const PRIVILEGED_ACTIONS = [
 ]
 
 function formatJson(value) { return JSON.stringify(value, null, 2) }
+function formatLatencyMs(value) {
+  if (!Number.isFinite(value)) return '-'
+  return `${Math.round(value)} ms`
+}
+function createSenseVoiceResultState(overrides = {}) {
+  return {
+    status: 'idle',
+    text: '',
+    timingMs: null,
+    mode: '',
+    convertedToWav: false,
+    error: '',
+    audioPath: '',
+    stream: false,
+    useVad: false,
+    chunks: [],
+    ...overrides,
+  }
+}
+function formatSenseVoiceChunks(chunks) {
+  if (!Array.isArray(chunks) || chunks.length === 0) return '无分块结果'
+  return chunks.map((item) => {
+    return `#${item.index} [${item.start_ms}ms - ${item.end_ms}ms] ${item.latency_ms}ms\n${item.text || '(empty)'}`
+  }).join('\n\n')
+}
 function buildAudioConstraints(deviceId) {
   const constraints = {
     autoGainControl: false,
@@ -144,10 +170,23 @@ export function App() {
   const [activeMenu, setActiveMenu] = useState(() => localStorage.getItem(STORAGE_KEYS.activeMenu) || ACTIVE_MENU.developer)
   const [audioPath, setAudioPath] = useState('')
   const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(STORAGE_KEYS.provider) || 'qwen')
+  const [senseVoiceEnabled, setSenseVoiceEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.senseVoiceEnabled) === 'true')
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
   const [timing, setTiming] = useState({})
   const [usage, setUsage] = useState({})
+  const [senseVoiceBusy, setSenseVoiceBusy] = useState(false)
+  const [senseVoiceProbe, setSenseVoiceProbe] = useState({
+    ready: false,
+    message: '尚未检测',
+    baseURL: '',
+    device: '',
+  })
+  const [senseVoiceResult, setSenseVoiceResult] = useState(createSenseVoiceResultState())
+  const [localAsrTestBusy, setLocalAsrTestBusy] = useState(false)
+  const [localAsrTestStream, setLocalAsrTestStream] = useState(false)
+  const [localAsrTestUseVad, setLocalAsrTestUseVad] = useState(false)
+  const [localAsrTestResult, setLocalAsrTestResult] = useState(createSenseVoiceResultState())
   const [manualCommand, setManualCommand] = useState('')
   const [typeText, setTypeText] = useState('')
   const [recordingState, setRecordingState] = useState('未录音')
@@ -183,6 +222,7 @@ export function App() {
 
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.activeMenu, activeMenu) }, [activeMenu])
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.provider, selectedProvider) }, [selectedProvider])
+  useEffect(() => { localStorage.setItem(STORAGE_KEYS.senseVoiceEnabled, String(senseVoiceEnabled)) }, [senseVoiceEnabled])
   useEffect(() => {
     selectedInputDeviceIdRef.current = selectedInputDeviceId
     localStorage.setItem(STORAGE_KEYS.microphoneId, selectedInputDeviceId)
@@ -248,6 +288,7 @@ export function App() {
     }).catch((error) => appendLog(`读取快捷键配置失败: ${error.message || error}`))
 
     refreshMicrophoneDevices()
+    probeSenseVoiceService()
 
     const handleDeviceChange = () => { refreshMicrophoneDevices() }
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange)
@@ -278,9 +319,10 @@ export function App() {
 
   async function pickAudioFile() {
     const filePath = await window.bridgeApi.pickAudioFile()
-    if (!filePath) return
+    if (!filePath) return ''
     setAudioPath(filePath)
     appendLog(`已选择音频文件: ${filePath}`)
+    return filePath
   }
 
   // 设置页里录入快捷键时，直接用浏览器键盘事件构造候选值。
@@ -312,6 +354,145 @@ export function App() {
     }
   }
 
+  // 设置页直接探活本地 SenseVoice 服务，便于确认本地识别能力是否已启动。
+  async function probeSenseVoiceService() {
+    try {
+      const nextState = await window.bridgeApi.probeSenseVoice()
+      setSenseVoiceProbe({
+        ready: true,
+        message: nextState.payload?.message || '服务可用',
+        baseURL: nextState.baseURL,
+        device: nextState.payload?.device || '',
+      })
+    } catch (error) {
+      setSenseVoiceProbe({
+        ready: false,
+        message: String(error.message || error),
+        baseURL: runtimeConfig?.sensevoice?.baseURL || '',
+        device: '',
+      })
+    }
+  }
+
+  // 本地 ASR 测试和并行识别共用同一条非流式调用链路，保证结果展示一致。
+  async function runSenseVoiceTranscription(filePath, options = {}) {
+    if (!filePath) {
+      appendLog('请先选择音频文件，或者先录音。')
+      return
+    }
+
+    setSenseVoiceBusy(true)
+    setSenseVoiceResult({
+      status: 'running',
+      text: '',
+      timingMs: null,
+      mode: 'sensevoice-small',
+      convertedToWav: false,
+      error: '',
+      audioPath: filePath,
+    })
+
+    try {
+      const result = await window.bridgeApi.transcribeSenseVoice({ filePath })
+      setSenseVoiceResult({
+        status: 'done',
+        text: result.text || '',
+        timingMs: Number.isFinite(result.localLatencyMs) ? result.localLatencyMs : null,
+        mode: result.mode || 'sensevoice-small',
+        convertedToWav: Boolean(result.convertedToWav),
+        error: '',
+        audioPath: result.audioPath || filePath,
+      })
+      setSenseVoiceProbe((current) => ({
+        ...current,
+        ready: true,
+        baseURL: result.baseURL || current.baseURL,
+      }))
+      appendLog(`${options.label || 'SenseVoice 本地识别'}完成：${result.text || '空结果'}`)
+    } catch (error) {
+      const message = String(error.message || error)
+      setSenseVoiceResult({
+        status: 'error',
+        text: '',
+        timingMs: null,
+        mode: 'sensevoice-small',
+        convertedToWav: false,
+        error: message,
+        audioPath: filePath,
+      })
+      appendLog(`${options.label || 'SenseVoice 本地识别'}失败: ${message}`)
+    } finally {
+      setSenseVoiceBusy(false)
+    }
+  }
+
+  // SenseVoice 本地识别与原有云端动作管道并行执行，避免拖慢动作落地。
+  function startSenseVoiceTranscription(filePath) {
+    if (!senseVoiceEnabled || !filePath) {
+      return
+    }
+
+    void runSenseVoiceTranscription(filePath, { label: 'SenseVoice 并行本地识别' })
+  }
+
+  // 开发者模式手动测试独立于产品链路，专门用于验证本地 ASR 参数组合。
+  async function testLocalAsr() {
+    let targetAudioPath = audioPath
+    if (!targetAudioPath) {
+      targetAudioPath = await pickAudioFile()
+    }
+
+    if (!targetAudioPath) {
+      appendLog('本地 ASR 测试已取消，未选择音频文件。')
+      return
+    }
+
+    setLocalAsrTestBusy(true)
+    setLocalAsrTestResult(createSenseVoiceResultState({
+      status: 'running',
+      mode: 'sensevoice-small',
+      audioPath: targetAudioPath,
+      stream: localAsrTestStream,
+      useVad: localAsrTestUseVad,
+    }))
+
+    try {
+      const result = await window.bridgeApi.transcribeSenseVoice({
+        filePath: targetAudioPath,
+        stream: localAsrTestStream,
+        useVad: localAsrTestUseVad,
+        chunkDurationMs: 600,
+      })
+      setLocalAsrTestResult(createSenseVoiceResultState({
+        status: 'done',
+        text: result.text || '',
+        timingMs: Number.isFinite(result.localLatencyMs) ? result.localLatencyMs : null,
+        mode: result.mode || 'sensevoice-small',
+        convertedToWav: Boolean(result.convertedToWav),
+        error: '',
+        audioPath: result.audioPath || targetAudioPath,
+        stream: Boolean(result.stream),
+        useVad: Boolean(result.useVad),
+        chunks: Array.isArray(result.chunks) ? result.chunks : [],
+      }))
+      appendLog(`本地 ASR 测试完成：${result.text || '空结果'}`)
+    } catch (error) {
+      const message = String(error.message || error)
+      setLocalAsrTestResult(createSenseVoiceResultState({
+        status: 'error',
+        mode: 'sensevoice-small',
+        convertedToWav: false,
+        error: message,
+        audioPath: targetAudioPath,
+        stream: localAsrTestStream,
+        useVad: localAsrTestUseVad,
+      }))
+      appendLog(`本地 ASR 测试失败: ${message}`)
+    } finally {
+      setLocalAsrTestBusy(false)
+    }
+  }
+
   // 音频分析是录音和文件导入的公共收口，避免两条状态机分叉。
   async function analyzeAudioFile(filePath) {
     if (!filePath) {
@@ -323,6 +504,7 @@ export function App() {
     setBusy(true)
     setAudioPath(filePath)
     appendLog(`开始分析音频: ${filePath}`)
+    startSenseVoiceTranscription(filePath)
     window.bridgeApi.notifyOverlayState({ status: 'waiting', title: '识别中', subtitle: '等待服务器返回...' })
 
     try {
@@ -600,6 +782,42 @@ export function App() {
 
         <Card>
           <CardHeader>
+            <div><div className="section-label">Local STT</div><CardTitle>SenseVoice 本地识别</CardTitle></div>
+            <CardDescription>开启后会在每次音频分析时并行执行本地转写，但不会替代原有动作解析管道。</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            <div className="settings-card">
+              <div className="settings-card__row">
+                <div className="settings-status">
+                  <span className={`settings-status__dot ${senseVoiceProbe.ready ? 'settings-status__dot--ok' : ''}`} />
+                  <span>{senseVoiceProbe.ready ? '本地服务已连接' : '本地服务未连接'}</span>
+                </div>
+                <button
+                  type="button"
+                  className={`ui-switch ${senseVoiceEnabled ? 'ui-switch--checked' : ''}`}
+                  aria-pressed={senseVoiceEnabled}
+                  onClick={() => setSenseVoiceEnabled((current) => !current)}
+                >
+                  <span className="ui-switch__thumb" />
+                </button>
+              </div>
+              <div className="helper-text">开关状态：{senseVoiceEnabled ? '已启用并行本地识别' : '未启用'}</div>
+              <div className="helper-text">服务地址：{senseVoiceProbe.baseURL || runtimeConfig?.sensevoice?.baseURL || '未配置'}</div>
+              <div className="helper-text">
+                托管状态：{runtimeConfig?.sensevoice?.managed?.status || 'unknown'}
+                {runtimeConfig?.sensevoice?.managed?.pid ? ` · pid=${runtimeConfig.sensevoice.managed.pid}` : ''}
+              </div>
+              <div className="helper-text">设备：{senseVoiceProbe.device || 'cpu'}</div>
+              <div className="helper-text">{senseVoiceProbe.message}</div>
+              <div className="row">
+                <Button variant="secondary" onClick={probeSenseVoiceService}>检测 SenseVoice 服务</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
             <div><div className="section-label">Audio</div><CardTitle>麦克风输入设备</CardTitle></div>
             <CardDescription>录音时会优先使用这里选中的输入设备。</CardDescription>
           </CardHeader>
@@ -655,6 +873,57 @@ export function App() {
                   </div>
                   <div className="helper-text">{recordingState}</div>
                 </div>
+              </CardContent>
+              
+              <CardHeader>
+                <div><div className="section-label">Input</div><CardTitle>本地ASR</CardTitle></div>
+              </CardHeader>
+              <CardContent className="stack">
+                <section className="subpanel">
+                  <div className="side-section__row">
+                    <div className="subpanel__title">Local ASR Test</div>
+                    <div className="desktop-capture-actions">
+                      <select className="ui-select local-asr-test__select" value={localAsrTestStream ? 'stream' : 'non-stream'} onChange={(event) => setLocalAsrTestStream(event.target.value === 'stream')}>
+                        <option value="non-stream">非流式</option>
+                        <option value="stream">流式</option>
+                      </select>
+                      <button
+                        type="button"
+                        className={`ui-switch ${localAsrTestUseVad ? 'ui-switch--checked' : ''}`}
+                        aria-pressed={localAsrTestUseVad}
+                        onClick={() => setLocalAsrTestUseVad((current) => !current)}
+                      >
+                        <span className="ui-switch__thumb" />
+                      </button>
+                      <Button variant="secondary" onClick={testLocalAsr} disabled={localAsrTestBusy}>
+                        {localAsrTestBusy ? '识别中...' : '测试本地 ASR'}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="helper-text">
+                    这是开发者独立测试入口，不绑定产品原有动作链路。
+                  </div>
+                  <div className="helper-text">
+                    模式：{localAsrTestResult.stream ? '流式' : '非流式'} · VAD：{localAsrTestResult.useVad ? '开启' : '关闭'} · 状态：{localAsrTestResult.status}
+                    {localAsrTestResult.mode ? ` · ${localAsrTestResult.mode}` : ''}
+                    {localAsrTestResult.timingMs !== null ? ` · ${formatLatencyMs(localAsrTestResult.timingMs)}` : ''}
+                    {localAsrTestResult.convertedToWav ? ' · 已转 wav' : ''}
+                  </div>
+                  <div className="helper-text">
+                    音频路径：{localAsrTestResult.audioPath || audioPath || '暂无'}
+                  </div>
+                  <div className="helper-text">
+                    产品并行状态：{senseVoiceEnabled ? (senseVoiceBusy ? '识别中' : senseVoiceResult.status) : '未启用'}
+                  </div>
+                  {localAsrTestResult.error ? <div className="helper-text">错误：{localAsrTestResult.error}</div> : null}
+                  <ScrollArea className="subpanel__body">
+                    <pre className="console-block">{localAsrTestResult.stream
+                      ? (formatSenseVoiceChunks(localAsrTestResult.chunks) + (localAsrTestResult.text ? `\n\nFinal:\n${localAsrTestResult.text}` : ''))
+                      : (localAsrTestResult.text || '点击上方按钮执行独立本地 ASR 测试。')}
+                    </pre>
+                  </ScrollArea>
+                </section>
+                
               </CardContent>
               <CardFooter className="footer-actions">
                 <Button className="footer-actions__grow" onClick={analyzeAudio} disabled={busy}>{busy ? '分析中...' : '转写并匹配动作'}</Button>

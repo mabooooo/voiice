@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
@@ -11,6 +12,7 @@ import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
+import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
@@ -43,6 +45,13 @@ let overlayResetTimer = null
 let indicatorWindows = []
 let indicatorResetTimer = null
 let recordingByShortcut = false
+let managedSenseVoiceProcess = null
+let managedSenseVoiceState = {
+  autostart: process.env.SENSEVOICE_AUTOSTART !== 'false',
+  status: 'idle',
+  pid: null,
+  lastError: '',
+}
 const shortcutManager = new GlobalShortcutManager({
   configPath: path.join(runtimeRoot, 'shortcut-config.json'),
   onToggle: ({ triggeredLabel }) => {
@@ -66,6 +75,11 @@ const OVERLAY_MARGIN_BOTTOM = 28
 const CORNER_INDICATOR_SIZE = 300
 const CORNER_INDICATOR_DURATION_MS = 3000
 const CORNER_INDICATOR_BORDER = 8
+const SENSEVOICE_DEFAULT_BASE_URL = process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010'
+const SENSEVOICE_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'sensevoice')
+const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
+const SENSEVOICE_PYTHON_PATH = path.join(SENSEVOICE_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
+const SENSEVOICE_SERVER_PATH = path.join(SENSEVOICE_CAPABILITY_ROOT, 'service', 'server.py')
 
 function disposeIndicatorWindows() {
   if (indicatorResetTimer) {
@@ -234,6 +248,183 @@ function pushShortcutState(payload) {
   mainWindow.webContents.send('bridge:shortcut-state-push', payload)
 }
 
+function parseSenseVoiceBaseUrl() {
+  try {
+    return new URL(SENSEVOICE_DEFAULT_BASE_URL)
+  } catch {
+    return new URL('http://127.0.0.1:8010')
+  }
+}
+
+function isLocalSenseVoiceUrl(url) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+}
+
+function buildSenseVoiceEnv() {
+  const cacheRoot = path.join(SENSEVOICE_LOCAL_ROOT, 'cache')
+  return {
+    ...process.env,
+    PIP_CACHE_DIR: path.join(cacheRoot, 'pip'),
+    HF_HOME: path.join(cacheRoot, 'hf'),
+    HUGGINGFACE_HUB_CACHE: path.join(cacheRoot, 'hf', 'hub'),
+    MODELSCOPE_CACHE: path.join(cacheRoot, 'modelscope'),
+    TEMP: path.join(cacheRoot, 'tmp'),
+    TMP: path.join(cacheRoot, 'tmp'),
+  }
+}
+
+async function isSenseVoiceReachable(timeoutMs = 1000) {
+  try {
+    await probeSenseVoice({ timeoutMs })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function waitForManagedSenseVoiceReady() {
+  // 子服务启动和 Python import 需要几秒，后台轮询状态但不阻塞 Electron 界面。
+  for (let index = 0; index < 45; index += 1) {
+    if (await isSenseVoiceReachable(1000)) {
+      managedSenseVoiceState = {
+        ...managedSenseVoiceState,
+        status: 'ready',
+        pid: managedSenseVoiceProcess?.pid || managedSenseVoiceState.pid,
+        lastError: '',
+      }
+      return
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+
+  managedSenseVoiceState = {
+    ...managedSenseVoiceState,
+    status: 'starting',
+    lastError: 'SenseVoice 服务启动中，但探活尚未完成。',
+  }
+}
+
+async function startManagedSenseVoiceService() {
+  // Electron 启动时自动托管本地 SenseVoice，用户只需要在设置页决定是否使用识别结果。
+  const baseUrl = parseSenseVoiceBaseUrl()
+  managedSenseVoiceState = {
+    ...managedSenseVoiceState,
+    autostart: process.env.SENSEVOICE_AUTOSTART !== 'false',
+  }
+
+  if (!managedSenseVoiceState.autostart) {
+    managedSenseVoiceState = { ...managedSenseVoiceState, status: 'disabled', lastError: '' }
+    return
+  }
+
+  if (!isLocalSenseVoiceUrl(baseUrl)) {
+    managedSenseVoiceState = {
+      ...managedSenseVoiceState,
+      status: 'external',
+      lastError: 'SENSEVOICE_BASE_URL 指向非本机地址，跳过自动启动。',
+    }
+    return
+  }
+
+  if (await isSenseVoiceReachable(800)) {
+    managedSenseVoiceState = { ...managedSenseVoiceState, status: 'external', lastError: '' }
+    return
+  }
+
+  if (!fs.existsSync(SENSEVOICE_PYTHON_PATH) || !fs.existsSync(SENSEVOICE_SERVER_PATH)) {
+    managedSenseVoiceState = {
+      ...managedSenseVoiceState,
+      status: 'missing',
+      lastError: 'SenseVoice 本地部署不存在，请先运行 npm run capability:sensevoice:setup。',
+    }
+    return
+  }
+
+  if (managedSenseVoiceProcess && !managedSenseVoiceProcess.killed) {
+    return
+  }
+
+  fs.mkdirSync(path.join(SENSEVOICE_LOCAL_ROOT, 'cache', 'tmp'), { recursive: true })
+  const stdoutLog = fs.createWriteStream(path.join(runtimeLogs, 'sensevoice.managed.stdout.log'), { flags: 'a' })
+  const stderrLog = fs.createWriteStream(path.join(runtimeLogs, 'sensevoice.managed.stderr.log'), { flags: 'a' })
+  const host = baseUrl.hostname === 'localhost' ? '127.0.0.1' : baseUrl.hostname
+  const port = baseUrl.port || '8010'
+
+  managedSenseVoiceProcess = spawn(SENSEVOICE_PYTHON_PATH, [
+    SENSEVOICE_SERVER_PATH,
+    '--host',
+    host,
+    '--port',
+    port,
+    '--device',
+    process.env.SENSEVOICE_DEVICE || 'cpu',
+  ], {
+    cwd: __dirname,
+    env: buildSenseVoiceEnv(),
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  managedSenseVoiceProcess.stdout.pipe(stdoutLog)
+  managedSenseVoiceProcess.stderr.pipe(stderrLog)
+  managedSenseVoiceState = {
+    ...managedSenseVoiceState,
+    status: 'starting',
+    pid: managedSenseVoiceProcess.pid,
+    lastError: '',
+  }
+
+  managedSenseVoiceProcess.on('error', (error) => {
+    managedSenseVoiceState = {
+      ...managedSenseVoiceState,
+      status: 'error',
+      pid: null,
+      lastError: String(error.message || error),
+    }
+  })
+
+  managedSenseVoiceProcess.on('exit', (code, signal) => {
+    if (managedSenseVoiceProcess) {
+      managedSenseVoiceState = {
+        ...managedSenseVoiceState,
+        status: code === 0 ? 'stopped' : 'error',
+        pid: null,
+        lastError: code === 0 ? '' : `SenseVoice 服务已退出，code=${code}, signal=${signal || ''}`,
+      }
+    }
+    managedSenseVoiceProcess = null
+  })
+
+  waitForManagedSenseVoiceReady().catch((error) => {
+    managedSenseVoiceState = {
+      ...managedSenseVoiceState,
+      status: 'error',
+      lastError: String(error.message || error),
+    }
+  })
+}
+
+async function ensureManagedSenseVoiceServiceReady() {
+  // 首次本地识别可能早于服务启动完成，这里兜底等待探活成功。
+  if (await isSenseVoiceReachable(1000)) {
+    return
+  }
+
+  await startManagedSenseVoiceService()
+  if (managedSenseVoiceState.status === 'starting') {
+    await waitForManagedSenseVoiceReady()
+  }
+}
+
+function stopManagedSenseVoiceService() {
+  // 只回收本次 Electron 托管的子进程，外部用户自行启动的服务不处理。
+  if (managedSenseVoiceProcess && !managedSenseVoiceProcess.killed) {
+    managedSenseVoiceProcess.kill()
+  }
+  managedSenseVoiceProcess = null
+}
+
 async function executeBridgePlan(plan) {
   const results = []
 
@@ -379,6 +570,13 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
 }
 
 app.whenReady().then(async () => {
+  startManagedSenseVoiceService().catch((error) => {
+    managedSenseVoiceState = {
+      ...managedSenseVoiceState,
+      status: 'error',
+      lastError: String(error.message || error),
+    }
+  })
   createWindow()
   createOverlayWindow()
   await shortcutManager.start()
@@ -391,6 +589,10 @@ app.whenReady().then(async () => {
       providers: listProviderStatuses(),
       omniparser: {
         baseURL: process.env.OMNIPARSER_BASE_URL || 'http://127.0.0.1:8000',
+      },
+      sensevoice: {
+        baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
+        managed: managedSenseVoiceState,
       },
       platform: process.platform,
       shortcut: shortcutManager.getState(),
@@ -441,6 +643,11 @@ app.whenReady().then(async () => {
     return probeOmniParser(payload)
   })
 
+  ipcMain.handle('bridge:probe-sensevoice', async (_event, payload = {}) => {
+    await ensureManagedSenseVoiceServiceReady()
+    return probeSenseVoice(payload)
+  })
+
   ipcMain.handle('bridge:test-omniparser', async (_event, payload = {}) => {
     const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
     const parseResult = await testOmniParserWithImage(targetDisplay.savedPath, payload)
@@ -485,6 +692,12 @@ app.whenReady().then(async () => {
         raw: matched.raw,
       },
     }
+  })
+
+  ipcMain.handle('bridge:transcribe-sensevoice', async (_event, payload = {}) => {
+    // SenseVoice 本地识别与云端动作解析解耦，单独暴露成独立 IPC。
+    await ensureManagedSenseVoiceServiceReady()
+    return transcribeSenseVoiceAudio(payload.filePath, payload)
   })
 
   ipcMain.handle('bridge:match-transcript', async (_event, payload) => {
@@ -563,5 +776,6 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   disposeIndicatorWindows()
+  stopManagedSenseVoiceService()
   shortcutManager.stop()
 })

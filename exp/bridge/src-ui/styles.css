@@ -483,6 +483,22 @@ textarea {
   justify-content: flex-end;
 }
 
+.local-asr-test__select {
+  min-width: 128px;
+}
+
+.local-asr-test__select {
+  min-width: 128px;
+}
+
+.local-asr-test__select {
+  min-width: 128px;
+}
+
+.local-asr-test__select {
+  min-width: 128px;
+}
+
 .desktop-capture-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

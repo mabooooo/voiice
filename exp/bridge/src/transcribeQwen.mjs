@@ -37,10 +37,13 @@ function runFfmpegConvert(inputPath, outputPath) {
   })
 }
 
-export async function prepareAudioForUpload(filePath) {
+export async function prepareAudioForUpload(filePath, options = {}) {
   const extension = path.extname(filePath).replace('.', '').toLowerCase()
+  const forceFormat = options.forceFormat || ''
+  const shouldForceWav = forceFormat === 'wav'
 
-  if (DIRECT_AUDIO_FORMATS.has(extension)) {
+  // 本地服务侧优先接收 wav，避免不同推理后端对压缩音频的支持差异。
+  if (DIRECT_AUDIO_FORMATS.has(extension) && (!shouldForceWav || extension === 'wav')) {
     return {
       uploadPath: filePath,
       format: extension,

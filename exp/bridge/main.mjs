@@ -15,6 +15,7 @@ import { probePPOcr, testPPOcrWithImage } from './src/ppOcrClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
+import { createVoiceActionRouter } from './src/voiceActionRouter.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
 
@@ -53,6 +54,15 @@ let managedSenseVoiceState = {
   pid: null,
   lastError: '',
 }
+let managedPPOcrProcess = null
+let managedPPOcrState = {
+  autostart: process.env.PPOCR_AUTOSTART !== 'false',
+  status: 'idle',
+  pid: null,
+  lastError: '',
+  warmed: false,
+}
+let voiceRouter = null
 const shortcutManager = new GlobalShortcutManager({
   configPath: path.join(runtimeRoot, 'shortcut-config.json'),
   onToggle: ({ triggeredLabel }) => {
@@ -83,6 +93,13 @@ const SENSEVOICE_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'sensevo
 const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
 const SENSEVOICE_PYTHON_PATH = path.join(SENSEVOICE_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
 const SENSEVOICE_SERVER_PATH = path.join(SENSEVOICE_CAPABILITY_ROOT, 'service', 'server.py')
+const PPOCR_DEFAULT_BASE_URL = process.env.PPOCR_BASE_URL || 'http://127.0.0.1:8020'
+const PPOCR_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'ppocr')
+const PPOCR_LOCAL_ROOT = path.join(PPOCR_CAPABILITY_ROOT, '.local')
+const PPOCR_PYTHON_PATH = path.join(PPOCR_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
+const PPOCR_SERVER_PATH = path.join(PPOCR_CAPABILITY_ROOT, 'service', 'server.py')
+// 1x1 透明像素 PNG，用于 PP-OCR 首次调用预热 lru_cache 里的模型。
+const WARMUP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
 
 function buildTimestampToken(date = new Date()) {
   const pad = value => String(value).padStart(2, '0')
@@ -157,6 +174,24 @@ function buildIndicatorWindowHtml() {
         border: ${WINDOW_HIGHLIGHT_BORDER}px solid #facc15;
         box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.32);
       }
+      .indicator--numbered {
+        border: 3px solid #38bdf8;
+        box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 0 12px rgba(56, 189, 248, 0.45);
+      }
+      .indicator__badge {
+        position: absolute;
+        left: -2px;
+        top: -2px;
+        min-width: 22px;
+        height: 22px;
+        padding: 0 6px;
+        border-radius: 11px;
+        background: #facc15;
+        color: #111827;
+        font: 700 13px/22px "Segoe UI", system-ui, sans-serif;
+        text-align: center;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+      }
     </style>
   </head>
   <body>
@@ -172,8 +207,11 @@ function buildIndicatorWindowHtml() {
           const top = Math.round(item.top || 0)
           const width = Math.max(0, Math.round(item.width || 0))
           const height = Math.max(0, Math.round(item.height || 0))
-          const type = item.type === 'window' ? 'window' : 'corner'
-          return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;"></div>'
+          const type = item.type === 'window' ? 'window' : item.type === 'numbered' ? 'numbered' : 'corner'
+          const badge = (type === 'numbered' && item.label != null)
+            ? '<div class="indicator__badge">' + String(item.label) + '</div>'
+            : ''
+          return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;">' + badge + '</div>'
         }).join('')
 
         return items.length > 0
@@ -646,6 +684,134 @@ function stopManagedSenseVoiceService() {
   managedSenseVoiceProcess = null
 }
 
+function parsePPOcrBaseUrl() {
+  try { return new URL(PPOCR_DEFAULT_BASE_URL) } catch { return new URL('http://127.0.0.1:8020') }
+}
+
+function isLocalPPOcrUrl(url) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+}
+
+async function isPPOcrReachable(timeoutMs = 1000) {
+  try {
+    await probePPOcr({ timeoutMs })
+    return true
+  } catch { return false }
+}
+
+async function waitForManagedPPOcrReady() {
+  for (let index = 0; index < 60; index += 1) {
+    if (await isPPOcrReachable(1000)) {
+      managedPPOcrState = { ...managedPPOcrState, status: 'ready', pid: managedPPOcrProcess?.pid || managedPPOcrState.pid, lastError: '' }
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  managedPPOcrState = { ...managedPPOcrState, status: 'starting', lastError: 'PP-OCR 服务启动中，但探活尚未完成。' }
+}
+
+async function startManagedPPOcrService() {
+  const baseUrl = parsePPOcrBaseUrl()
+  managedPPOcrState = { ...managedPPOcrState, autostart: process.env.PPOCR_AUTOSTART !== 'false' }
+
+  if (!managedPPOcrState.autostart) {
+    managedPPOcrState = { ...managedPPOcrState, status: 'disabled', lastError: '' }
+    return
+  }
+  if (!isLocalPPOcrUrl(baseUrl)) {
+    managedPPOcrState = { ...managedPPOcrState, status: 'external', lastError: 'PPOCR_BASE_URL 指向非本机地址，跳过自动启动。' }
+    return
+  }
+  if (await isPPOcrReachable(800)) {
+    managedPPOcrState = { ...managedPPOcrState, status: 'external', lastError: '' }
+    return
+  }
+  if (!fs.existsSync(PPOCR_PYTHON_PATH) || !fs.existsSync(PPOCR_SERVER_PATH)) {
+    managedPPOcrState = { ...managedPPOcrState, status: 'missing', lastError: 'PP-OCR 本地部署不存在，请先运行 npm run capability:ppocr:setup。' }
+    return
+  }
+  if (managedPPOcrProcess && !managedPPOcrProcess.killed) return
+
+  fs.mkdirSync(path.join(PPOCR_LOCAL_ROOT, 'cache'), { recursive: true })
+  const stdoutLog = fs.createWriteStream(path.join(runtimeLogs, 'ppocr.managed.stdout.log'), { flags: 'a' })
+  const stderrLog = fs.createWriteStream(path.join(runtimeLogs, 'ppocr.managed.stderr.log'), { flags: 'a' })
+  const host = baseUrl.hostname === 'localhost' ? '127.0.0.1' : baseUrl.hostname
+  const port = baseUrl.port || '8020'
+
+  managedPPOcrProcess = spawn(PPOCR_PYTHON_PATH, [
+    PPOCR_SERVER_PATH,
+    '--host', host,
+    '--port', port,
+    '--device', process.env.PPOCR_DEVICE || 'cpu',
+  ], {
+    cwd: __dirname,
+    env: { ...process.env },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  managedPPOcrProcess.stdout.pipe(stdoutLog)
+  managedPPOcrProcess.stderr.pipe(stderrLog)
+  managedPPOcrState = { ...managedPPOcrState, status: 'starting', pid: managedPPOcrProcess.pid, lastError: '' }
+
+  managedPPOcrProcess.on('error', (error) => {
+    managedPPOcrState = { ...managedPPOcrState, status: 'error', pid: null, lastError: String(error.message || error) }
+  })
+  managedPPOcrProcess.on('exit', (code, signal) => {
+    if (managedPPOcrProcess) {
+      managedPPOcrState = {
+        ...managedPPOcrState,
+        status: code === 0 ? 'stopped' : 'error',
+        pid: null,
+        lastError: code === 0 ? '' : `PP-OCR 服务已退出，code=${code}, signal=${signal || ''}`,
+      }
+    }
+    managedPPOcrProcess = null
+  })
+
+  waitForManagedPPOcrReady()
+    .then(() => { void warmupPPOcr() })
+    .catch((error) => {
+      managedPPOcrState = { ...managedPPOcrState, status: 'error', lastError: String(error.message || error) }
+    })
+}
+
+async function ensureManagedPPOcrServiceReady() {
+  if (await isPPOcrReachable(1000)) return
+  await startManagedPPOcrService()
+  if (managedPPOcrState.status === 'starting') {
+    await waitForManagedPPOcrReady()
+  }
+}
+
+async function warmupPPOcr() {
+  // 服务 ready 后触发一次 1x1 PNG 推理，命中 lru_cache 里的 PaddleOCR 初始化。
+  if (managedPPOcrState.warmed) return
+  try {
+    const response = await fetch(`${PPOCR_DEFAULT_BASE_URL.replace(/\/+$/, '')}/parse/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base64_image: WARMUP_PNG_BASE64 }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (response.ok) {
+      managedPPOcrState = { ...managedPPOcrState, warmed: true }
+      console.log('[ppocr] warmup complete')
+    } else {
+      console.warn('[ppocr] warmup non-200:', response.status)
+    }
+  } catch (error) {
+    console.warn('[ppocr] warmup failed:', error.message || error)
+  }
+}
+
+function stopManagedPPOcrService() {
+  if (managedPPOcrProcess && !managedPPOcrProcess.killed) {
+    managedPPOcrProcess.kill()
+  }
+  managedPPOcrProcess = null
+}
+
 async function executeBridgePlan(plan) {
   const results = []
 
@@ -731,6 +897,60 @@ async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suff
   return outputPath
 }
 
+// 语音点击链路：截主屏原图 → 调 PP-OCR → 返回 OCR 行 + 坐标换算所需元数据。
+async function captureAndOcrPrimaryDisplay() {
+  await ensureManagedPPOcrServiceReady()
+  const captureResult = await captureDesktopScreenshots({
+    outputDir: runtimeScreenshots,
+    compressed: false,
+    maxHeight: 9999,
+  })
+  const item = captureResult.items.find(it => it.isPrimary) || captureResult.items[0]
+  if (!item) throw new Error('未能抓取主屏截图')
+
+  const display = screen.getAllDisplays().find(d => d.id === item.displayId) || screen.getPrimaryDisplay()
+  const logicalWidth = display.bounds.width
+  const scaleFactor = item.width / Math.max(1, logicalWidth)
+  const origin = display.nativeOrigin || display.bounds
+
+  const parseResult = await testPPOcrWithImage(item.savedPath)
+  return {
+    ocrLines: parseResult.ocrLines || [],
+    lineCount: parseResult.lineCount || 0,
+    imagePath: item.savedPath,
+    imageWidth: item.width,
+    imageHeight: item.height,
+    displayId: display.id,
+    scaleFactor,
+    originX: Math.round(origin.x),
+    originY: Math.round(origin.y),
+  }
+}
+
+// 候选高亮：在对应屏幕的指示层上画带编号的框；不自动清除，由语音 FSM 控制生命周期。
+async function renderCandidateHighlights({ displayId, items }) {
+  const windows = await ensureIndicatorWindows()
+  // FSM 新一轮候选渲染前主动清掉上一次残留。
+  if (indicatorResetTimer) { clearTimeout(indicatorResetTimer); indicatorResetTimer = null }
+
+  const overlayItems = (items || []).map(it => ({
+    type: 'numbered',
+    left: it.overlayRect.left,
+    top: it.overlayRect.top,
+    width: it.overlayRect.width,
+    height: it.overlayRect.height,
+    label: String(it.index),
+  }))
+
+  for (const w of windows) {
+    const payload = w.display.id === displayId ? overlayItems : []
+    await w.window.webContents.executeJavaScript(
+      `window.renderIndicators(${JSON.stringify({ items: payload })})`,
+      true,
+    )
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -811,6 +1031,17 @@ app.whenReady().then(async () => {
       status: 'error',
       lastError: String(error.message || error),
     }
+  })
+  startManagedPPOcrService().catch((error) => {
+    managedPPOcrState = { ...managedPPOcrState, status: 'error', lastError: String(error.message || error) }
+  })
+  voiceRouter = createVoiceActionRouter({
+    captureAndOcr: captureAndOcrPrimaryDisplay,
+    highlightCandidates: renderCandidateHighlights,
+    clearIndicators: clearIndicatorWindows,
+    clickAt: async (x, y) => executeActionPlan([{ action: 'click_at', args: { x, y } }]),
+    logger: (msg) => { console.log(msg); mainWindow?.webContents.send('bridge:voice-log', { message: msg, at: new Date().toISOString() }) },
+    notifyOverlay: (payload) => setOverlayState(payload),
   })
   createWindow()
   createOverlayWindow()
@@ -969,6 +1200,27 @@ app.whenReady().then(async () => {
     }
   })
 
+  ipcMain.handle('bridge:voice-handle-audio', async (_event, payload = {}) => {
+    // 右 Alt 链路专用：本地 SenseVoice 转写 → 送入语音 FSM；云端 LLM 链路在这条链路里暂时禁用。
+    await ensureManagedSenseVoiceServiceReady()
+    const asr = await transcribeSenseVoiceAudio(payload.filePath, payload)
+    const transcript = String(asr.text || '').trim()
+    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript) : { handled: false, reason: 'router-missing' }
+    return { transcript, asr, routed, state: voiceRouter?.getState() }
+  })
+
+  ipcMain.handle('bridge:voice-route-text', async (_event, payload = {}) => {
+    // 调试入口：直接喂文本给 FSM（跳过 ASR），方便无麦调试。
+    const transcript = String(payload?.transcript || '').trim()
+    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript) : { handled: false, reason: 'router-missing' }
+    return { transcript, routed, state: voiceRouter?.getState() }
+  })
+
+  ipcMain.handle('bridge:voice-reset', async () => {
+    voiceRouter?.reset('manual')
+    return { ok: true, state: voiceRouter?.getState() }
+  })
+
   ipcMain.handle('bridge:transcribe-sensevoice', async (_event, payload = {}) => {
     // SenseVoice 本地识别与云端动作解析解耦，单独暴露成独立 IPC。
     await ensureManagedSenseVoiceServiceReady()
@@ -1057,5 +1309,6 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   disposeIndicatorWindows()
   stopManagedSenseVoiceService()
+  stopManagedPPOcrService()
   shortcutManager.stop()
 })

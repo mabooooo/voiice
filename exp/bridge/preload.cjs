@@ -13,6 +13,14 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   showCornerIndicators: () => ipcRenderer.invoke('bridge:show-corner-indicators'),
   analyzeAudio: (payload) => ipcRenderer.invoke('bridge:analyze-audio', payload),
   transcribeSenseVoice: (payload) => ipcRenderer.invoke('bridge:transcribe-sensevoice', payload),
+  voiceHandleAudio: (payload) => ipcRenderer.invoke('bridge:voice-handle-audio', payload),
+  voiceRouteText: (payload) => ipcRenderer.invoke('bridge:voice-route-text', payload),
+  voiceReset: () => ipcRenderer.invoke('bridge:voice-reset'),
+  onVoiceLog: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('bridge:voice-log', handler)
+    return () => ipcRenderer.removeListener('bridge:voice-log', handler)
+  },
   matchTranscript: (payload) => ipcRenderer.invoke('bridge:match-transcript', payload),
   executePlan: (payload) => ipcRenderer.invoke('bridge:execute-plan', payload),
   listWindows: () => ipcRenderer.invoke('bridge:list-windows'),

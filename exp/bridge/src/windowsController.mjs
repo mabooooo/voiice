@@ -9,6 +9,7 @@ const ALLOWED_ACTIONS = new Set([
   'send_shortcut',
   'move_mouse_to_center',
   'left_click_current_position',
+  'click_at',
 ])
 
 const SHORTCUT_MAP = {
@@ -164,6 +165,28 @@ Write-Output "left_click_current_position"
   return runPowerShell(script)
 }
 
+async function clickAt(x, y) {
+  const px = Math.round(Number(x) || 0)
+  const py = Math.round(Number(y) || 0)
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class BridgeClickAt {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+}
+"@
+[BridgeClickAt]::SetCursorPos(${px}, ${py}) | Out-Null
+Start-Sleep -Milliseconds 40
+[BridgeClickAt]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+[BridgeClickAt]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Write-Output "click_at:${px},${py}"
+`
+
+  return runPowerShell(script)
+}
+
 async function executeStep(step) {
   if (!step?.action || !ALLOWED_ACTIONS.has(step.action)) {
     throw new Error(`动作不在白名单中: ${JSON.stringify(step)}`)
@@ -184,6 +207,8 @@ async function executeStep(step) {
       return moveMouseToCenter()
     case 'left_click_current_position':
       return leftClickCurrentPosition()
+    case 'click_at':
+      return clickAt(step.args?.x, step.args?.y)
     default:
       throw new Error(`未支持的动作: ${step.action}`)
   }

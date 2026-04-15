@@ -1,4 +1,31 @@
 # Changelog
+## 0.0.19 语音 OCR 点选路由 + PP-OCR 托管启动
+
+### Added
+
+- 新增 [src/voiceActionRouter.mjs](D:/Projects/AI/voiice/exp/bridge/src/voiceActionRouter.mjs)，以依赖注入方式实现语音点选 FSM，状态为 `idle / await_selection`，并带 `15s` 超时自动重置。
+- `voiceActionRouter` 新增 `extractTrigger / extractSelectionIndex / pickCandidates`，支持“点击 / 点一下 / 打开 / open / click + 关键词”、`1-9 / 一二三 / 第X个` 以及按 OCR 行做最多 `9` 个候选排序。
+- `src/windowsController.mjs` 新增白名单动作 `click_at {x,y}`，通过 `SetCursorPos + mouse_event` 执行物理像素级单击。
+- 主进程新增 `bridge:voice-handle-audio`、`bridge:voice-route-text`、`bridge:voice-reset` 与 `bridge:voice-log`，分别用于 ASR+FSM 路由、无麦调试、状态清理与日志推送。
+- preload 新增 `voiceHandleAudio / voiceRouteText / voiceReset / onVoiceLog` 暴露给渲染层。
+
+### Changed
+
+- `main.mjs` 新增 PP-OCR 托管能力：`startManagedPPOcrService / ensureReady / warmupPPOcr / stopManagedPPOcrService`，与 SenseVoice 采用同一套启动、探活和退出回收模式。
+- Electron 启动时会自动拉起本地 PP-OCR 服务并用 `1x1 PNG` 触发一次 warmup，尽量把模型加载前移到启动阶段。
+- 指示层 HTML/CSS 扩展为支持 `indicator--numbered` 与 `.indicator__badge`，可在目标屏幕上显示带编号的青色候选框和黄色数字徽章。
+- 新增 `captureAndOcrPrimaryDisplay`：固定抓取主屏原始 PNG，再调用 PP-OCR，并返回 `scaleFactor + originX/Y`，为点击映射与多屏拼接提供统一坐标基础。
+- 新增 `renderCandidateHighlights`：只在目标 `displayId` 的指示层绘制候选框，并由 FSM 控制清理时机，不再在渲染后自动清空。
+- `src-ui/App.jsx` 中，右 `Alt` 快捷键停止录音后的链路改为 `analyzeAudioFile -> routeVoiceAudio`，优先走本地 `SenseVoice + FSM`；原云端 LLM 动作解析暂时从快捷键链路中移除。
+- 手动文件分析与按钮触发的分析链路仍保持原有云端解析方式，便于后续平滑合并。
+- Execution Log 现已订阅 `onVoiceLog`，会回显本地点选状态与步骤日志。
+
+### Notes
+
+- 截图坐标采用物理像素，Overlay 绘制采用逻辑像素，点击坐标使用 `display.nativeOrigin + bbox center` 回到物理像素，避免 DPI 缩放下点击偏移。
+- 当前推荐流程为：启动应用后自动托管 PP-OCR，按右 `Alt` 说“点击开发者模式”，屏幕出现编号候选框，再说“3”或“第三个”完成点击。
+- 无麦调试可直接在渲染进程 console 调用：`bridgeApi.voiceRouteText({ transcript: '点击开发者模式' })`。
+
 ## 0.0.18 开发者模式窗口高亮指示
 
 ### Added

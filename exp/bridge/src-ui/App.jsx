@@ -303,10 +303,12 @@ export function App() {
       else stopRecording(true, { recorder: recorderRef.current, mediaStream: mediaStreamRef.current })
     })
     const unsubscribeShortcutState = window.bridgeApi.onShortcutState((state) => setShortcutState(state))
+    const unsubscribeVoiceLog = window.bridgeApi.onVoiceLog?.(({ message }) => appendLog(message)) || (() => {})
 
     return () => {
       unsubscribeToggle()
       unsubscribeShortcutState()
+      unsubscribeVoiceLog()
       navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange)
     }
   }, [])
@@ -600,6 +602,25 @@ export function App() {
     await startLocalAsrTestRecording()
   }
 
+  // 右 Alt 链路专用：本地 ASR + 语音 FSM，不再走云端 LLM 动作解析。
+  async function routeVoiceAudio(filePath) {
+    if (!filePath) return
+    appendLog(`语音路由开始：${filePath}`)
+    try {
+      const result = await window.bridgeApi.voiceHandleAudio({ filePath })
+      const transcript = result?.transcript || ''
+      setTranscript(transcript)
+      const phase = result?.state?.phase || 'idle'
+      const action = result?.routed?.action || (result?.routed?.handled ? 'handled' : 'no-trigger')
+      appendLog(`ASR="${transcript}" → ${action} · phase=${phase}`)
+    } catch (error) {
+      appendLog(`语音路由失败: ${error.message || error}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing', title: '语音路由失败', subtitle: String(error.message || error), autoResetMs: 4000,
+      })
+    }
+  }
+
   // 音频分析是录音和文件导入的公共收口，避免两条状态机分叉。
   async function analyzeAudioFile(filePath) {
     if (!filePath) {
@@ -787,7 +808,8 @@ export function App() {
         if (autoAnalyzeAfterStopRef.current || triggeredByShortcut) {
           setAutoAnalyzeAfterStop(false)
           autoAnalyzeAfterStopRef.current = false
-          setTimeout(() => { analyzeAudioFile(tempPath) }, 10)
+          // 右 Alt 链路：云端 LLM 动作解析暂时屏蔽，只走本地 SenseVoice → 语音 FSM（点击/打开 + 数字选择）。
+          setTimeout(() => { routeVoiceAudio(tempPath) }, 10)
         }
       })
 

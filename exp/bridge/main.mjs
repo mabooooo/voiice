@@ -88,6 +88,7 @@ const CORNER_INDICATOR_DURATION_MS = 3000
 const CORNER_INDICATOR_BORDER = 8
 const WINDOW_HIGHLIGHT_DURATION_MS = 3000
 const WINDOW_HIGHLIGHT_BORDER = 4
+const CANDIDATE_HIGHLIGHT_PADDING = 20
 const SENSEVOICE_DEFAULT_BASE_URL = process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010'
 const SENSEVOICE_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'sensevoice')
 const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
@@ -180,8 +181,7 @@ function buildIndicatorWindowHtml() {
       }
       .indicator__badge {
         position: absolute;
-        left: -2px;
-        top: -2px;
+        top: 50%;
         min-width: 22px;
         height: 22px;
         padding: 0 6px;
@@ -191,6 +191,13 @@ function buildIndicatorWindowHtml() {
         font: 700 13px/22px "Segoe UI", system-ui, sans-serif;
         text-align: center;
         box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+        transform: translateY(-50%);
+      }
+      .indicator__badge--right {
+        left: calc(100% + 8px);
+      }
+      .indicator__badge--left {
+        right: calc(100% + 8px);
       }
     </style>
   </head>
@@ -209,7 +216,7 @@ function buildIndicatorWindowHtml() {
           const height = Math.max(0, Math.round(item.height || 0))
           const type = item.type === 'window' ? 'window' : item.type === 'numbered' ? 'numbered' : 'corner'
           const badge = (type === 'numbered' && item.label != null)
-            ? '<div class="indicator__badge">' + String(item.label) + '</div>'
+            ? '<div class="indicator__badge indicator__badge--' + (item.badgeSide === 'left' ? 'left' : 'right') + '">' + String(item.label) + '</div>'
             : ''
           return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;">' + badge + '</div>'
         }).join('')
@@ -899,6 +906,7 @@ async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suff
 
 // 语音点击链路：截主屏原图 → 调 PP-OCR → 返回 OCR 行 + 坐标换算所需元数据。
 async function captureAndOcrPrimaryDisplay() {
+  const captureStartAt = Date.now()
   await ensureManagedPPOcrServiceReady()
   const captureResult = await captureDesktopScreenshots({
     outputDir: runtimeScreenshots,
@@ -907,13 +915,16 @@ async function captureAndOcrPrimaryDisplay() {
   })
   const item = captureResult.items.find(it => it.isPrimary) || captureResult.items[0]
   if (!item) throw new Error('未能抓取主屏截图')
+  console.log(`[${new Date().toISOString()}] [voice] capture completed in ${Date.now() - captureStartAt}ms: ${item.savedPath}`)
 
   const display = screen.getAllDisplays().find(d => d.id === item.displayId) || screen.getPrimaryDisplay()
   const logicalWidth = display.bounds.width
   const scaleFactor = item.width / Math.max(1, logicalWidth)
   const origin = display.nativeOrigin || display.bounds
 
+  const ocrStartAt = Date.now()
   const parseResult = await testPPOcrWithImage(item.savedPath)
+  console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
   return {
     ocrLines: parseResult.ocrLines || [],
     lineCount: parseResult.lineCount || 0,
@@ -933,17 +944,33 @@ async function renderCandidateHighlights({ displayId, items }) {
   // FSM 新一轮候选渲染前主动清掉上一次残留。
   if (indicatorResetTimer) { clearTimeout(indicatorResetTimer); indicatorResetTimer = null }
 
-  const overlayItems = (items || []).map(it => ({
-    type: 'numbered',
-    left: it.overlayRect.left,
-    top: it.overlayRect.top,
-    width: it.overlayRect.width,
-    height: it.overlayRect.height,
-    label: String(it.index),
-  }))
-
   for (const w of windows) {
-    const payload = w.display.id === displayId ? overlayItems : []
+    const payload = w.display.id === displayId
+      ? (items || []).map((it) => {
+          const left = Math.max(0, it.overlayRect.left - CANDIDATE_HIGHLIGHT_PADDING)
+          const top = Math.max(0, it.overlayRect.top - CANDIDATE_HIGHLIGHT_PADDING)
+          const right = Math.min(
+            w.display.bounds.width,
+            it.overlayRect.left + it.overlayRect.width + CANDIDATE_HIGHLIGHT_PADDING,
+          )
+          const bottom = Math.min(
+            w.display.bounds.height,
+            it.overlayRect.top + it.overlayRect.height + CANDIDATE_HIGHLIGHT_PADDING,
+          )
+          const badgeSide = right + 48 <= w.display.bounds.width ? 'right' : 'left'
+
+          // 候选框围绕原 bbox 居中外扩 20px，并把编号放到右侧；右边越界时切到左侧。
+          return {
+            type: 'numbered',
+            left,
+            top,
+            width: Math.max(1, right - left),
+            height: Math.max(1, bottom - top),
+            label: String(it.index),
+            badgeSide,
+          }
+        })
+      : []
     await w.window.webContents.executeJavaScript(
       `window.renderIndicators(${JSON.stringify({ items: payload })})`,
       true,
@@ -1040,7 +1067,12 @@ app.whenReady().then(async () => {
     highlightCandidates: renderCandidateHighlights,
     clearIndicators: clearIndicatorWindows,
     clickAt: async (x, y) => executeActionPlan([{ action: 'click_at', args: { x, y } }]),
-    logger: (msg) => { console.log(msg); mainWindow?.webContents.send('bridge:voice-log', { message: msg, at: new Date().toISOString() }) },
+    logger: (msg) => {
+      const at = new Date().toISOString()
+      const message = `[${at}] ${msg}`
+      console.log(message)
+      mainWindow?.webContents.send('bridge:voice-log', { message, at })
+    },
     notifyOverlay: (payload) => setOverlayState(payload),
   })
   createWindow()

@@ -14,6 +14,7 @@
 - 在开发者模式里执行多屏桌面截图，并可额外生成 `640P` 压缩截图落盘
 - 开发者模式窗口列表支持对指定窗口做本地边框高亮，默认 `3s` 后自动消失
 - 开发者模式窗口详情页支持单独截图当前窗口，并保存到本地截图目录
+- 支持基于 `SenseVoice + PP-OCR` 的本地点选式语音路由：先说“点击 xxx”，再说“第 N 个”
 
 ## 安全边界
 
@@ -32,6 +33,7 @@
 - `type_text_to_focused_input`
 - `open_app("WeChat")`
 - `send_shortcut("cmd+w")`
+- `click_at({x, y})`
 
 ## 高权限测试动作
 
@@ -138,6 +140,36 @@ npm run capability:ppocr:start
 - 默认缓存目录为 `exp/bridge/capabilities/ppocr/.local/cache`
 - 当前只使用 `PP-OCRv5 mobile det + rec`
 - 开发者模式新增了 `PP-OCRv5 Mobile` 测试面板，可自动截取主屏并保存 OCR 标注图
+- Electron 启动时会自动托管本地 PP-OCR 服务，并在首次启动后跑一次 `1x1 PNG` warmup，尽量把模型加载前移
+
+## 语音点选路由
+
+当前项目新增了一条本地“语音触发 -> OCR 候选 -> 说序号点击”的实验链路：
+
+1. 右 `Alt` 开始录音
+2. 说“点击开发者模式”这类触发语句
+3. 松开后，主屏会执行一次原始 PNG 截图与 PP-OCR
+4. 命中的候选项会以带编号的青色框显示在对应屏幕上
+5. 再按右 `Alt` 说“3”或“第三个”
+6. 路由器会把编号映射为 `click_at({x,y})` 执行点击
+
+当前 FSM：
+
+- `idle`
+- `await_selection`
+
+约束：
+
+- `15s` 内没有说出编号会自动 reset 并清空候选框
+- 触发词支持：`点击 / 点一下 / 打开 / open / click + 关键词`
+- 序号支持：`1-9 / 一二三四五六七八九 / 第X个`
+- 候选筛选来自 OCR 行，按完整命中和短文本命中加权，最多保留 `9` 个
+
+调试方式：
+
+- 有麦链路：按右 `Alt` 录“点击开发者模式” -> 候选框出现 -> 再说“第三个”
+- 无麦链路：在渲染进程 console 执行 `bridgeApi.voiceRouteText({ transcript: '点击开发者模式' })`
+- 状态重置：可调用 `bridgeApi.voiceReset()`
 
 ## 本地部署 SenseVoice Small
 
@@ -179,6 +211,10 @@ npm run start
 - 当前桌面控制通过 Electron 主进程调用 PowerShell 完成
 - 窗口高亮使用长期驻留的透明、置顶、鼠标穿透 Electron 窗口，默认隐藏，仅在测试时短暂显示
 - 窗口截图会先把目标窗口调到前台，再优先使用 `PrintWindow` 抓取内容；若失败，会对前台窗口回退为按屏幕区域裁剪
+- 右 `Alt` 快捷键停止录音后的链路目前优先走本地 `SenseVoice + FSM`，云端 LLM 动作解析在该快捷键链路里暂时屏蔽
+- 手动文件分析和界面按钮触发的分析链路仍保持原有云端解析方式
+- 候选框 Overlay 使用逻辑像素；截图与点击落点使用物理像素，并通过 `display.nativeOrigin` 适配多显示器拼接
+- Execution Log 会订阅本地语音路由日志，便于观察候选筛选、状态切换和点击执行过程
 - 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
 - OmniParser 本地部署产物默认保存到 `exp/bridge/capabilities/omniparser/.local`
 - PP-OCR 本地部署产物默认保存到 `exp/bridge/capabilities/ppocr/.local`

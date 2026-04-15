@@ -87,11 +87,16 @@ export function createVoiceActionRouter(deps) {
       clearTimeout(state.timer)
       state.timer = null
     }
-    if (state.phase !== 'idle') {
-      log(`[voice] reset -> idle (${reason || ''})`)
-    }
     state = { phase: 'idle', candidates: [], keyword: '', timer: null }
     try { deps.clearIndicators?.() } catch {}
+    void reason
+  }
+
+  // 单候选和确认态共用点击执行，保证两条路径的 overlay 表现一致。
+  async function clickCandidate(target, title) {
+    deps.notifyOverlay?.({ status: 'executing', title, subtitle: target.text, autoResetMs: 3000 })
+    await deps.clickAt?.(target.clickX, target.clickY)
+    reset('clicked')
   }
 
   function armTimeout() {
@@ -112,8 +117,7 @@ export function createVoiceActionRouter(deps) {
         log(`[voice] selection=${idx} -> click "${target.text}" @ (${target.clickX},${target.clickY})`)
         deps.notifyOverlay?.({ status: 'executing', title: `点击 ${idx}`, subtitle: target.text, autoResetMs: 3000 })
         try {
-          await deps.clickAt?.(target.clickX, target.clickY)
-          reset('clicked')
+          await clickCandidate(target, `点击 ${idx}`)
           return { handled: true, action: 'click', index: idx, target }
         } catch (error) {
           log(`[voice] click failed: ${error.message || error}`)
@@ -126,8 +130,8 @@ export function createVoiceActionRouter(deps) {
       const triggerRetry = extractTrigger(text)
       if (triggerRetry) {
         reset('retrigger')
+        log(`[voice] retrigger 新触发词，允许重入: "${text}"`)
       } else {
-        log(`[voice] await_selection ignored: "${text}"`)
         return { handled: false, phase: 'await_selection', reason: 'no-digit' }
       }
     }
@@ -138,7 +142,7 @@ export function createVoiceActionRouter(deps) {
       log(`[voice] no trigger in: "${text}"`)
       return { handled: false, reason: 'no-trigger' }
     }
-
+    
     log(`[voice] trigger "${trig.keyword}" → OCR...`)
     deps.notifyOverlay?.({ status: 'waiting', title: `定位“${trig.keyword}”`, subtitle: '识别屏幕中...' })
 
@@ -146,7 +150,7 @@ export function createVoiceActionRouter(deps) {
     try {
       ocr = await deps.captureAndOcr()
     } catch (error) {
-      log(`[voice] capture/ocr failed: ${error.message || error}`)
+      log(`[voice] capture+ocr failed: ${error.message || error}`)
       deps.notifyOverlay?.({ status: 'executing', title: 'OCR 失败', subtitle: String(error.message || error), autoResetMs: 3500 })
       return { handled: true, action: 'ocr-error', error: String(error.message || error) }
     }
@@ -179,6 +183,18 @@ export function createVoiceActionRouter(deps) {
       }
     })
 
+    // 只有一个候选时直接点击，避免多余的确认轮次。
+    if (candidates.length === 1) {
+      try {
+        await clickCandidate(candidates[0], '直接点击')
+        return { handled: true, action: 'click', index: 1, target: candidates[0], autoSelected: true }
+      } catch (error) {
+        log(`[voice] click failed: ${error.message || error}`)
+        reset('click-error')
+        return { handled: true, action: 'click-error', error: String(error.message || error) }
+      }
+    }
+
     try {
       await deps.highlightCandidates?.({ displayId: ocr.displayId, items: candidates })
     } catch (error) {
@@ -192,7 +208,6 @@ export function createVoiceActionRouter(deps) {
       timer: null,
     }
     armTimeout()
-    log(`[voice] await_selection with ${candidates.length} candidates for "${trig.keyword}"`)
     deps.notifyOverlay?.({
       status: 'executing',
       title: `定位到 ${candidates.length} 项`,

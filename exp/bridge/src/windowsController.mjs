@@ -173,10 +173,13 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 public static class BridgeClickAt {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 }
 "@
+# 鼠标点击先声明 DPI aware，避免高缩放桌面下坐标被系统虚拟化后点偏。
+[BridgeClickAt]::SetProcessDPIAware() | Out-Null
 [BridgeClickAt]::SetCursorPos(${px}, ${py}) | Out-Null
 Start-Sleep -Milliseconds 40
 [BridgeClickAt]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)

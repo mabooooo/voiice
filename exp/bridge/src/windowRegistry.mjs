@@ -46,6 +46,7 @@ public static class BridgeWindowApi {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 }
 "@
 `
@@ -220,6 +221,84 @@ ${actionBody}
 `
 }
 
+function buildWindowCaptureScript(handle, outputPath) {
+  const safeHandle = String(handle).replace(/'/g, '')
+  const safeOutputPath = String(outputPath).replace(/'/g, "''")
+
+  return `
+${buildWindowApiScript()}
+Add-Type -AssemblyName System.Drawing
+
+$hWnd = [IntPtr][Int64]'${safeHandle}'
+if ($hWnd -eq [IntPtr]::Zero) { throw "Invalid window handle" }
+if (-not [BridgeWindowApi]::IsWindow($hWnd)) { throw "Window not found" }
+if ([BridgeWindowApi]::IsIconic($hWnd)) { throw "Window is minimized" }
+
+$rect = New-Object RECT
+[BridgeWindowApi]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+$width = [Math]::Max(1, $rect.Right - $rect.Left)
+$height = [Math]::Max(1, $rect.Bottom - $rect.Top)
+$foreground = [BridgeWindowApi]::GetForegroundWindow()
+
+# 窗口截图优先走 PrintWindow，尽量直接抓窗口内容而不是桌面合成后的遮挡结果。
+$bitmap = New-Object System.Drawing.Bitmap $width, $height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$hdc = $graphics.GetHdc()
+$printSucceeded = $false
+$usedFlag = 2
+$captureMethod = 'PrintWindow'
+
+try {
+  $printSucceeded = [BridgeWindowApi]::PrintWindow($hWnd, $hdc, 2)
+  if (-not $printSucceeded) {
+    $usedFlag = 0
+    $printSucceeded = [BridgeWindowApi]::PrintWindow($hWnd, $hdc, 0)
+  }
+} finally {
+  $graphics.ReleaseHdc($hdc)
+  $graphics.Dispose()
+}
+
+if (-not $printSucceeded) {
+  # 只有当前前台窗口才适合直接按屏幕区域裁剪，否则会把遮挡层一起截进来。
+  if ($foreground -eq $hWnd) {
+    $fallbackGraphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $fallbackGraphics.CopyFromScreen(
+        $rect.Left,
+        $rect.Top,
+        0,
+        0,
+        (New-Object System.Drawing.Size($width, $height)),
+        [System.Drawing.CopyPixelOperation]::SourceCopy
+      )
+      $captureMethod = 'CopyFromScreen'
+    } finally {
+      $fallbackGraphics.Dispose()
+    }
+  } else {
+    $bitmap.Dispose()
+    throw "PrintWindow failed and target window is not foreground"
+  }
+}
+
+$outputPath = '${safeOutputPath}'
+$bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+$bitmap.Dispose()
+
+[PSCustomObject]@{
+  ok = $true
+  handle = '${safeHandle}'
+  imagePath = $outputPath
+  width = [int]$width
+  height = [int]$height
+  method = $captureMethod
+  printFlag = [int]$usedFlag
+  isForeground = ($foreground -eq $hWnd)
+} | ConvertTo-Json -Depth 4
+`
+}
+
 async function parseJsonOutput(result) {
   return result.stdout ? JSON.parse(result.stdout) : []
 }
@@ -317,6 +396,45 @@ export class WindowRegistry {
       item: target,
       updatedAt: snapshot.updatedAt,
       automation,
+    }
+  }
+
+  async captureWindow(handle, outputPath) {
+    let snapshot = await this.listWindows()
+    let target = snapshot.items.find(
+      (item) => item.handle === String(handle) || item.shortId === String(handle),
+    )
+
+    if (!target) {
+      throw new Error(`Window not found: ${handle}`)
+    }
+
+    // 详情页点击按钮时，前台通常会变成 bridge 自己。
+    // 截图前先把目标窗口重新调到前台，给 PrintWindow 失败后的屏幕裁剪回退兜底。
+    if (!target.isFocused) {
+      await this.performWindowAction({
+        action: 'focus',
+        handle: target.handle,
+        processId: target.processId,
+      })
+      await new Promise(resolve => setTimeout(resolve, 180))
+      snapshot = await this.listWindows()
+      target = snapshot.items.find(
+        (item) => item.handle === String(handle) || item.shortId === String(handle),
+      )
+      if (!target) {
+        throw new Error(`Window not found after focus: ${handle}`)
+      }
+    }
+
+    const result = await runPowerShell(
+      buildWindowCaptureScript(target.handle, outputPath),
+    )
+    const parsed = await parseJsonOutput(result)
+    return {
+      item: target,
+      updatedAt: snapshot.updatedAt,
+      capture: parsed,
     }
   }
 }

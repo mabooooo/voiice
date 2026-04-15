@@ -84,6 +84,19 @@ const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
 const SENSEVOICE_PYTHON_PATH = path.join(SENSEVOICE_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
 const SENSEVOICE_SERVER_PATH = path.join(SENSEVOICE_CAPABILITY_ROOT, 'service', 'server.py')
 
+function buildTimestampToken(date = new Date()) {
+  const pad = value => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '-',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join('')
+}
+
 function disposeIndicatorWindows() {
   if (indicatorResetTimer) {
     clearTimeout(indicatorResetTimer)
@@ -687,6 +700,20 @@ async function capturePrimaryDesktopForOmniParser(payload = {}) {
   }
 }
 
+async function captureWindowImage(handle) {
+  const detail = await windowRegistry.getWindowDetail(handle)
+  const target = detail.item
+  const fileName = `window-${target.shortId.toLowerCase()}-${buildTimestampToken()}.png`
+  const outputPath = path.join(runtimeScreenshots, fileName)
+  const result = await windowRegistry.captureWindow(target.handle, outputPath)
+
+  return {
+    ...result.capture,
+    item: result.item,
+    updatedAt: result.updatedAt,
+  }
+}
+
 // 视觉能力的标注图统一回写到截图目录，便于后续人工复核与对比。
 async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suffix) {
   if (!imageDataUrl) {
@@ -975,6 +1002,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:get-window-automation', async (_event, payload = {}) => {
     return windowRegistry.getWindowAutomation(payload.handle, payload.options)
+  })
+
+  ipcMain.handle('bridge:capture-window', async (_event, handle) => {
+    // 窗口截图独立于整屏截图链路，优先用于前台窗口的无遮挡抓图。
+    return captureWindowImage(handle)
   })
 
   ipcMain.handle('bridge:window-action', async (_event, payload) => {

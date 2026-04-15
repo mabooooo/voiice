@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   refreshWindows: () => ipcRenderer.invoke('bridge:refresh-windows'),
   getWindowDetail: (handle) => ipcRenderer.invoke('bridge:get-window-detail', handle),
   highlightWindow: (payload) => ipcRenderer.invoke('bridge:highlight-window', payload),
+  captureWindow: (handle) => ipcRenderer.invoke('bridge:capture-window', handle),
   getWindowAutomation: (payload) => ipcRenderer.invoke('bridge:get-window-automation', payload),
   windowAction: (payload) => ipcRenderer.invoke('bridge:window-action', payload),
   getShortcutState: () => ipcRenderer.invoke('bridge:get-shortcut-state'),

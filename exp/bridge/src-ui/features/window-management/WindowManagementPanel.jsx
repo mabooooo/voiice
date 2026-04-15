@@ -58,6 +58,7 @@ export function WindowManagementPanel({ onLog }) {
   const [automationBusy, setAutomationBusy] = useState(false)
   const [windowAutomation, setWindowAutomation] = useState(null)
   const [highlightingHandle, setHighlightingHandle] = useState('')
+  const [windowCaptureResult, setWindowCaptureResult] = useState(null)
 
   useEffect(() => {
     refreshWindows()
@@ -94,10 +95,27 @@ export function WindowManagementPanel({ onLog }) {
       const detail = await window.bridgeApi.getWindowDetail(handle)
       setSelectedWindow(detail.item)
       setWindowAutomation(null)
+      setWindowCaptureResult(null)
       syncMoveForm(detail.item)
       setWindowDialogOpen(true)
     } catch (error) {
       appendWindowLog(`读取窗口详情失败: ${error.message || error}`)
+    } finally {
+      setWindowBusy(false)
+    }
+  }
+
+  // 窗口截图优先用于前台窗口内容校验，结果直接落到本地截图目录。
+  async function captureSelectedWindow() {
+    if (!selectedWindow?.handle) return
+
+    setWindowBusy(true)
+    try {
+      const result = await window.bridgeApi.captureWindow(selectedWindow.handle)
+      setWindowCaptureResult(result)
+      appendWindowLog(`窗口截图完成: ${selectedWindow.shortId}，方式 ${result.method}，已保存到 ${result.imagePath}`)
+    } catch (error) {
+      appendWindowLog(`窗口截图失败: ${error.message || error}`)
     } finally {
       setWindowBusy(false)
     }
@@ -225,6 +243,12 @@ export function WindowManagementPanel({ onLog }) {
           <section className="subpanel">
             <div className="subpanel__title">基本信息</div>
             <pre className="console-block console-block--compact">{formatJson(selectedWindow || {})}</pre>
+            {windowCaptureResult ? (
+              <div className="window-capture-result">
+                <div className="helper-text">最近截图：{windowCaptureResult.width}x{windowCaptureResult.height} · {windowCaptureResult.method}</div>
+                <div className="helper-text">{windowCaptureResult.imagePath}</div>
+              </div>
+            ) : null}
           </section>
           <section className="subpanel">
             <div className="subpanel__title">移动窗口</div>
@@ -253,6 +277,9 @@ export function WindowManagementPanel({ onLog }) {
           </section>
         </div>
         <DialogFooter>
+          <Button variant="secondary" onClick={captureSelectedWindow} disabled={windowBusy}>
+            截图窗口
+          </Button>
           <Button variant="secondary" onClick={() => runWindowAction('focus')} disabled={windowBusy}>调起 / 聚焦</Button>
           <Button variant="secondary" onClick={() => runWindowAction('move')} disabled={windowBusy}>移动窗口</Button>
           <Button onClick={() => runWindowAction('close')} disabled={windowBusy}>关闭窗口</Button>

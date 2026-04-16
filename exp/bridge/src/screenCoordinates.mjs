@@ -8,6 +8,16 @@
 //
 // 使用者：main.mjs（截图 / OCR / 空间记忆）、voiceActionRouter.mjs（候选换算）。
 
+// e.g.
+// window bounds (100,50 / 1000×700 逻辑) + image 2000×1400 物理
+//   OCR bbox 物理 (500,400)-(700,500)
+//     → localClickPhysical (600, 450)   ← 直接可喂 clickWindowLocalPoint
+//     → clickLogical      (400, 275)    ← 供 findBestWindowForPoint
+
+// fullscreen display 1920×1080 逻辑 / 3840×2160 物理
+//   OCR bbox 物理 (600,300)-(800,400)
+//     → globalPhysicalClick (700, 350)  ← 直接可喂 clickAt
+
 export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }

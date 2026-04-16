@@ -1,10 +1,18 @@
 // 本地语音动作路由：维护一个极简 FSM。
-// idle：等待“点击/打开/open/click X”触发词 → OCR 屏幕 → 列候选 → 进入 await_selection
+// idle：等待“点击/打开/open/click X”触发词 → OCR 屏幕/窗口 → 列候选 → 进入 await_selection
 // await_selection：等待数字（1-9 / 一 二 ... / 第几个） → 根据候选执行点击
 //
 // FSM 只存在主进程内存，依赖由 main.mjs 注入（截图、OCR、高亮、点击、日志）。
 
-const TRIGGER_REGEX = /(?:点击|点一下|点下|打开|open|click)\s*[“”"'「『\[]?\s*([^“”"'」』\]。，,.!！?？\s]+)/i
+const TRIGGER_REGEX = /(点击|点一下|点下|打开|open|click)\s*[“”"'「『\[]?\s*([^“”"'」』\]。，,.!！?？\s]+)/i
+const VERB_POLICY = {
+  点击: { scope: 'full-screen' },
+  点一下: { scope: 'full-screen' },
+  点下: { scope: 'full-screen' },
+  click: { scope: 'full-screen' },
+  打开: { scope: 'focused-window' },
+  open: { scope: 'focused-window' },
+}  // scope: 'focused-window' | 'full-screen'
 
 const CN_DIGIT_MAP = {
   一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
@@ -14,13 +22,21 @@ const CN_DIGIT_MAP = {
 const MAX_CANDIDATES = 9
 const AWAIT_TIMEOUT_MS = 15000
 
+// 先做语法抽取，再通过动词策略补上后续 OCR 范围。
 export function extractTrigger(text) {
   if (!text) return null
   const match = TRIGGER_REGEX.exec(text)
   if (!match) return null
-  const keyword = String(match[1] || '').trim()
+  const verb = String(match[1] || '').trim().toLowerCase()
+  const keyword = String(match[2] || '').trim()
   if (!keyword) return null
-  return { keyword, raw: match[0] }
+  const policy = VERB_POLICY[verb] || { scope: 'full-screen' }
+  return {
+    keyword,
+    raw: match[0],
+    verb,
+    scope: policy.scope,
+  }
 }
 
 export function extractSelectionIndex(text) {
@@ -75,7 +91,7 @@ export function pickCandidates(ocrLines, keyword, limit = MAX_CANDIDATES) {
 }
 
 export function createVoiceActionRouter(deps) {
-  // deps: { captureAndOcr, resolveSpatialMemoryCandidate, rememberSpatialSelection, highlightCandidates, clearIndicators, clickAt, clickWindowPoint, logger, notifyOverlay }
+  // deps: { captureAndOcr, captureAndOcrFocusedWindow, resolveSpatialMemoryCandidate, rememberSpatialSelection, highlightCandidates, clearIndicators, clickAt, clickWindowPoint, logger, notifyOverlay }
   let state = { phase: 'idle', candidates: [], keyword: '', timer: null }
 
   function log(msg) {
@@ -130,6 +146,85 @@ export function createVoiceActionRouter(deps) {
     state.timer = setTimeout(() => reset('timeout'), AWAIT_TIMEOUT_MS)
   }
 
+  // 同一套 pick 结果在不同 OCR 空间下复用：整屏 OCR 直接映射到全局，窗口 OCR 则先映射到窗口坐标再换到全局。
+  function mapOcrPicksToCandidates(ocr, picks) {
+    return picks.map((item, index) => {
+      const [x1, y1, x2, y2] = item.bbox
+      const cx = (x1 + x2) / 2
+      const cy = (y1 + y2) / 2
+
+      if (ocr.coordinateSpace === 'window') {
+        const windowItem = ocr.window
+        const mappedRect = ocr.mapImageRectToLogical?.({
+          x: x1,
+          y: y1,
+          width: x2 - x1,
+          height: y2 - y1,
+        })
+        const localLeft = mappedRect?.localRect?.left ?? 0
+        const localTop = mappedRect?.localRect?.top ?? 0
+        const localWidth = Math.max(1, mappedRect?.localRect?.width ?? 1)
+        const localHeight = Math.max(1, mappedRect?.localRect?.height ?? 1)
+        const logicalLeft = mappedRect?.logicalRect?.left ?? windowItem.bounds.x
+        const logicalTop = mappedRect?.logicalRect?.top ?? windowItem.bounds.y
+        // clickWindowLocalPoint 是 DPI-aware 的：它读取的是窗口的“物理”矩形，
+        // 再按原样把 offset 加到 rect.Left / Top，所以这里必须给“物理”像素。
+        // OCR bbox 就来自窗口截图的物理像素，bbox 中心本身就是正确的物理 offset，
+        // 不要再除 scaleFactor，否则高 DPI 下会按缩放比点偏。
+        const physicalLocalClickX = cx
+        const physicalLocalClickY = cy
+
+        return {
+          index: index + 1,
+          text: item.text,
+          bbox: item.bbox,
+          source: 'focused-window-ocr',
+          windowHandle: windowItem.handle,
+          localClickX: Math.round(physicalLocalClickX),
+          localClickY: Math.round(physicalLocalClickY),
+          logicalRect: {
+            left: logicalLeft,
+            top: logicalTop,
+            width: localWidth,
+            height: localHeight,
+          },
+          overlayRect: {
+            left: Math.round(logicalLeft - (ocr.displayBounds?.x || 0)),
+            top: Math.round(logicalTop - (ocr.displayBounds?.y || 0)),
+            width: Math.max(1, Math.round(localWidth)),
+            height: Math.max(1, Math.round(localHeight)),
+          },
+          // clickX / clickY 留着给 findBestWindowForPoint 和非窗口点击兜底，保持“全局逻辑像素”。
+          clickX: Math.round(logicalLeft + localWidth / 2),
+          clickY: Math.round(logicalTop + localHeight / 2),
+        }
+      }
+
+      const logicalWidth = Math.max(1, (x2 - x1) / ocr.scaleFactor)
+      const logicalHeight = Math.max(1, (y2 - y1) / ocr.scaleFactor)
+      return {
+        index: index + 1,
+        text: item.text,
+        bbox: item.bbox,
+        source: 'full-ocr',
+        logicalRect: {
+          left: (ocr.displayBounds?.x || 0) + (x1 / ocr.scaleFactor),
+          top: (ocr.displayBounds?.y || 0) + (y1 / ocr.scaleFactor),
+          width: logicalWidth,
+          height: logicalHeight,
+        },
+        overlayRect: {
+          left: Math.round(x1 / ocr.scaleFactor),
+          top: Math.round(y1 / ocr.scaleFactor),
+          width: Math.max(1, Math.round(logicalWidth)),
+          height: Math.max(1, Math.round(logicalHeight)),
+        },
+        clickX: Math.round(ocr.originX + cx),
+        clickY: Math.round(ocr.originY + cy),
+      }
+    })
+  }
+
   async function handleTranscript(transcript, options = {}) {
     const text = String(transcript || '').trim()
     if (!text) {
@@ -176,7 +271,11 @@ export function createVoiceActionRouter(deps) {
     
     log(`[voice] trigger "${trig.keyword}" → OCR...`)
     log(`[voice] route options: backend=${options.backend || 'ppocr'} spatialMemory=${options.spatialMemoryEnabled ? 'on' : 'off'}`)
-    deps.notifyOverlay?.({ status: 'waiting', title: `定位“${trig.keyword}”`, subtitle: '识别屏幕中...' })
+    deps.notifyOverlay?.({
+      status: 'waiting',
+      title: `定位“${trig.keyword}”`,
+      subtitle: trig.scope === 'focused-window' ? '识别当前窗口中...' : '识别屏幕中...',
+    })
 
     if (options.spatialMemoryEnabled) {
       try {
@@ -199,8 +298,10 @@ export function createVoiceActionRouter(deps) {
 
     let ocr
     try {
-      // OCR 后端由设置页透传进来，便于在 PP-OCR 和 RapidOCR 之间切换。
-      ocr = await deps.captureAndOcr({ backend: options.backend })
+      // “打开”默认只 OCR 当前焦点窗口；“点击”仍走整屏 OCR。
+      ocr = trig.scope === 'focused-window'
+        ? await deps.captureAndOcrFocusedWindow?.({ backend: options.backend })
+        : await deps.captureAndOcr({ backend: options.backend })
     } catch (error) {
       log(`[voice] capture+ocr failed: ${error.message || error}`)
       deps.notifyOverlay?.({ status: 'executing', title: 'OCR 失败', subtitle: String(error.message || error), autoResetMs: 3500 })
@@ -215,36 +316,7 @@ export function createVoiceActionRouter(deps) {
       return { handled: true, action: 'no-candidate', keyword: trig.keyword }
     }
 
-    // 把候选的 bbox（图像像素）映射为：1) 屏幕指示层坐标（逻辑像素） 2) 全局物理点击坐标
-    const candidates = picks.map((item, index) => {
-      const [x1, y1, x2, y2] = item.bbox
-      const cx = (x1 + x2) / 2
-      const cy = (y1 + y2) / 2
-      const logicalLeft = (ocr.displayBounds?.x || 0) + (x1 / ocr.scaleFactor)
-      const logicalTop = (ocr.displayBounds?.y || 0) + (y1 / ocr.scaleFactor)
-      const logicalWidth = Math.max(1, (x2 - x1) / ocr.scaleFactor)
-      const logicalHeight = Math.max(1, (y2 - y1) / ocr.scaleFactor)
-      return {
-        index: index + 1,
-        text: item.text,
-        bbox: item.bbox,
-        source: 'full-ocr',
-        logicalRect: {
-          left: logicalLeft,
-          top: logicalTop,
-          width: logicalWidth,
-          height: logicalHeight,
-        },
-        overlayRect: {
-          left: Math.round(x1 / ocr.scaleFactor),
-          top: Math.round(y1 / ocr.scaleFactor),
-          width: Math.max(1, Math.round(logicalWidth)),
-          height: Math.max(1, Math.round(logicalHeight)),
-        },
-        clickX: Math.round(ocr.originX + cx),
-        clickY: Math.round(ocr.originY + cy),
-      }
-    })
+    const candidates = mapOcrPicksToCandidates(ocr, picks)
 
     // 只有一个候选时直接点击，避免多余的确认轮次。
     if (candidates.length === 1) {

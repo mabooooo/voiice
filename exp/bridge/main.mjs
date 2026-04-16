@@ -52,6 +52,10 @@ let overlayResetTimer = null
 let lastOverlayLogKey = ''
 let indicatorWindows = []
 let indicatorResetTimer = null
+let focusIndicatorTimer = null
+let focusIndicatorUpdateInFlight = false
+let focusIndicatorKey = ''
+let focusIndicatorRevision = 0
 let recordingByShortcut = false
 let managedSenseVoiceProcess = null
 let managedSenseVoiceState = {
@@ -102,6 +106,9 @@ const CORNER_INDICATOR_BORDER = 8
 const WINDOW_HIGHLIGHT_DURATION_MS = 3000
 const WINDOW_HIGHLIGHT_BORDER = 4
 const CANDIDATE_HIGHLIGHT_PADDING = 20
+const FOCUS_WINDOW_BORDER = 1
+const FOCUS_WINDOW_LABEL = '当前窗口'
+const FOCUS_WINDOW_POLL_MS = 400
 const SENSEVOICE_DEFAULT_BASE_URL = process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010'
 const SENSEVOICE_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'sensevoice')
 const SENSEVOICE_LOCAL_ROOT = path.join(SENSEVOICE_CAPABILITY_ROOT, '.local')
@@ -195,6 +202,36 @@ function buildRelativeRectFromLogicalRect(logicalRect, windowBounds) {
     y: clamp((logicalRect.top - windowBounds.y) / windowBounds.height, 0, 1),
     width: clamp(logicalRect.width / windowBounds.width, 0, 1),
     height: clamp(logicalRect.height / windowBounds.height, 0, 1),
+  }
+}
+
+// 把“窗口截图里的像素坐标”统一换算成“窗口内逻辑坐标 + 全局逻辑坐标”，
+// 后续高亮、点击和空间记忆都可以复用这套映射。
+function mapCapturedWindowRectToLogical({ windowItem, imageWidth, imageHeight, rect }) {
+  if (!windowItem?.bounds?.width || !windowItem?.bounds?.height || !imageWidth || !imageHeight || !rect) {
+    return null
+  }
+
+  const scaleX = imageWidth / Math.max(1, windowItem.bounds.width)
+  const scaleY = imageHeight / Math.max(1, windowItem.bounds.height)
+  const width = Math.max(1, rect.width / scaleX)
+  const height = Math.max(1, rect.height / scaleY)
+  const localLeft = rect.x / scaleX
+  const localTop = rect.y / scaleY
+
+  return {
+    localRect: {
+      left: localLeft,
+      top: localTop,
+      width,
+      height,
+    },
+    logicalRect: {
+      left: windowItem.bounds.x + localLeft,
+      top: windowItem.bounds.y + localTop,
+      width,
+      height,
+    },
   }
 }
 
@@ -343,15 +380,19 @@ async function tryResolveCandidateFromSpatialMemory({ keyword, backend, logger }
   const [x1, y1, x2, y2] = target.bbox
   const localCx = (x1 + x2) / 2
   const localCy = (y1 + y2) / 2
-  // 小区域 OCR 返回的是 crop 内局部坐标，这里再映射回窗口全局坐标用于真实点击。
-  const windowX = searchRect.x + (cropRect.x / scaleX - searchRect.x) + (localCx / scaleX)
-  const windowY = searchRect.y + (cropRect.y / scaleY - searchRect.y) + (localCy / scaleY)
+  // OCR 输入是“窗口截图物理像素 -> crop”，所以 (cropRect.x + localCx, cropRect.y + localCy)
+  // 就是按钮在窗口内的“物理像素偏移”。clickWindowLocalPoint 是 DPI-aware 的，必须吃物理 offset。
+  const physicalLocalX = cropRect.x + localCx
+  const physicalLocalY = cropRect.y + localCy
+  // 全局逻辑坐标再除一次 scale，供 findBestWindowForPoint / highlight / fallback clickAt 使用。
+  const windowX = physicalLocalX / scaleX
+  const windowY = physicalLocalY / scaleY
   const logicalClickX = focusedWindow.bounds.x + windowX
   const logicalClickY = focusedWindow.bounds.y + windowY
   const clickX = Math.round(logicalClickX)
   const clickY = Math.round(logicalClickY)
 
-  logger?.(`[voice] spatial-memory hit: ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title} -> logical=(${clickX},${clickY})`)
+  logger?.(`[voice] spatial-memory hit: ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title} -> logical=(${clickX},${clickY}) localPhysical=(${Math.round(physicalLocalX)},${Math.round(physicalLocalY)})`)
   return {
     index: 1,
     text: target.text,
@@ -364,8 +405,8 @@ async function tryResolveCandidateFromSpatialMemory({ keyword, backend, logger }
     clickX,
     clickY,
     windowHandle: focusedWindow.handle,
-    localClickX: Math.round(windowX),
-    localClickY: Math.round(windowY),
+    localClickX: Math.round(physicalLocalX),
+    localClickY: Math.round(physicalLocalY),
     source: 'spatial-memory',
     window: focusedWindow,
     logicalRect: {
@@ -479,6 +520,20 @@ async function clearIndicatorWindows() {
   }
 }
 
+// 指示层常驻存在，所有高亮都只通过更新 DOM 内容完成。
+async function pushIndicatorItems(rectGroups = []) {
+  const windows = await ensureIndicatorWindows()
+  const groupsByDisplayId = new Map(rectGroups.map((item) => [item.displayId, item.items]))
+
+  for (const item of windows) {
+    const items = groupsByDisplayId.get(item.display.id) || []
+    await item.window.webContents.executeJavaScript(
+      `window.renderIndicators(${JSON.stringify({ items })})`,
+      true,
+    )
+  }
+}
+
 function buildIndicatorWindowHtml() {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -510,6 +565,10 @@ function buildIndicatorWindowHtml() {
         border: ${WINDOW_HIGHLIGHT_BORDER}px solid #facc15;
         box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.32);
       }
+      .indicator--focus-window {
+        border: ${FOCUS_WINDOW_BORDER}px solid #facc15;
+        box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.2);
+      }
       .indicator--numbered {
         border: 3px solid #38bdf8;
         box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 0 12px rgba(56, 189, 248, 0.45);
@@ -534,6 +593,21 @@ function buildIndicatorWindowHtml() {
       .indicator__badge--left {
         right: calc(100% + 8px);
       }
+      .indicator__label {
+        position: absolute;
+        left: 50%;
+        bottom: 0;
+        padding: 3px 10px 4px;
+        border: 1px solid #facc15;
+        border-top: 0;
+        border-radius: 0 0 10px 10px;
+        background: #facc15;
+        color: #222;
+        font: 600 12px/1.1 "Segoe UI", system-ui, sans-serif;
+        white-space: nowrap;
+        transform: translate(-50%, calc(100% - 1px));
+        box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+      }
     </style>
   </head>
   <body>
@@ -549,11 +623,20 @@ function buildIndicatorWindowHtml() {
           const top = Math.round(item.top || 0)
           const width = Math.max(0, Math.round(item.width || 0))
           const height = Math.max(0, Math.round(item.height || 0))
-          const type = item.type === 'window' ? 'window' : item.type === 'numbered' ? 'numbered' : 'corner'
+          const type = item.type === 'window'
+            ? 'window'
+            : item.type === 'focus-window'
+              ? 'focus-window'
+              : item.type === 'numbered'
+                ? 'numbered'
+                : 'corner'
           const badge = (type === 'numbered' && item.label != null)
             ? '<div class="indicator__badge indicator__badge--' + (item.badgeSide === 'left' ? 'left' : 'right') + '">' + String(item.label) + '</div>'
             : ''
-          return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;">' + badge + '</div>'
+          const title = (type === 'focus-window' && item.label)
+            ? '<div class="indicator__label">' + String(item.label) + '</div>'
+            : ''
+          return '<div class="indicator indicator--' + type + '" style="left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + height + 'px;">' + badge + title + '</div>'
         }).join('')
 
         return items.length > 0
@@ -671,6 +754,40 @@ function buildWindowHighlightRects(bounds, displays) {
   })
 }
 
+function buildFocusWindowIndicatorRects(bounds, displays) {
+  const normalizedBounds = normalizeRectangle(bounds)
+  const centerDisplay = screen.getDisplayNearestPoint({
+    x: normalizedBounds.x + normalizedBounds.width / 2,
+    y: normalizedBounds.y + normalizedBounds.height / 2,
+  })
+
+  return displays.map((display) => {
+    const sourceBounds = getDisplaySourceBounds(display)
+    const left = Math.max(normalizedBounds.x, sourceBounds.x)
+    const top = Math.max(normalizedBounds.y, sourceBounds.y)
+    const right = Math.min(normalizedBounds.x + normalizedBounds.width, sourceBounds.x + sourceBounds.width)
+    const bottom = Math.min(normalizedBounds.y + normalizedBounds.height, sourceBounds.y + sourceBounds.height)
+
+    if (right <= left || bottom <= top) {
+      return { displayId: display.id, items: [] }
+    }
+
+    return {
+      displayId: display.id,
+      items: [
+        {
+          type: 'focus-window',
+          left: left - sourceBounds.x,
+          top: top - sourceBounds.y,
+          width: right - left,
+          height: bottom - top,
+          label: display.id === centerDisplay.id ? FOCUS_WINDOW_LABEL : '',
+        },
+      ],
+    }
+  })
+}
+
 function normalizeRectangle(bounds) {
   return {
     x: Math.round(Number(bounds?.x ?? 0)),
@@ -693,17 +810,7 @@ function getDisplaySourceBounds(display) {
 }
 
 async function renderIndicators(rectGroups, durationMs) {
-  const windows = await ensureIndicatorWindows()
-  const groupsByDisplayId = new Map(rectGroups.map((item) => [item.displayId, item.items]))
-
-  // 常驻透明层始终存在，这里只更新每块屏幕内部的高亮内容。
-  for (const item of windows) {
-    const items = groupsByDisplayId.get(item.display.id) || []
-    await item.window.webContents.executeJavaScript(
-      `window.renderIndicators(${JSON.stringify({ items })})`,
-      true,
-    )
-  }
+  await pushIndicatorItems(rectGroups)
 
   indicatorResetTimer = setTimeout(() => {
     void clearIndicatorWindows()
@@ -714,6 +821,71 @@ async function rebuildIndicatorWindows() {
   // 显示器布局变化后立即后台重建，避免下一次点击才触发初始化延迟。
   disposeIndicatorWindows()
   await ensureIndicatorWindows()
+}
+
+function shouldShowFocusIndicatorForOverlay(payload = {}) {
+  if (payload?.status !== 'listening') return false
+  const title = String(payload?.title || '')
+  const subtitle = String(payload?.subtitle || '')
+  return title.includes('连续听写') || subtitle.includes('再按') || subtitle.includes('快捷键')
+}
+
+// 轮询聚焦窗口，并把结果同步到透明高亮层。
+async function refreshFocusedWindowIndicator() {
+  if (focusIndicatorUpdateInFlight) return
+  const revision = focusIndicatorRevision
+  focusIndicatorUpdateInFlight = true
+  try {
+    const snapshot = await windowRegistry.refreshSnapshot()
+    // 停止收音后，如果有旧请求回流，直接丢弃，避免高亮被重新画出来。
+    if (revision !== focusIndicatorRevision) return
+    const focusedWindow = snapshot.focusedWindow
+    if (!focusedWindow?.bounds?.width || !focusedWindow?.bounds?.height) {
+      if (focusIndicatorKey) {
+        focusIndicatorKey = ''
+        await clearIndicatorWindows()
+      }
+      return
+    }
+
+    const nextKey = JSON.stringify({
+      handle: focusedWindow.handle,
+      x: focusedWindow.bounds.x,
+      y: focusedWindow.bounds.y,
+      width: focusedWindow.bounds.width,
+      height: focusedWindow.bounds.height,
+      title: focusedWindow.title,
+    })
+    if (nextKey === focusIndicatorKey) return
+
+    focusIndicatorKey = nextKey
+    const rectGroups = buildFocusWindowIndicatorRects(focusedWindow.bounds, screen.getAllDisplays())
+    if (revision !== focusIndicatorRevision) return
+    await pushIndicatorItems(rectGroups)
+  } finally {
+    focusIndicatorUpdateInFlight = false
+  }
+}
+
+// 进入连续听写时启动窗口轮询，让高亮框跟随焦点窗口移动。
+function startFocusedWindowIndicator() {
+  if (focusIndicatorTimer) return
+  focusIndicatorRevision += 1
+  void refreshFocusedWindowIndicator()
+  focusIndicatorTimer = setInterval(() => {
+    void refreshFocusedWindowIndicator()
+  }, FOCUS_WINDOW_POLL_MS)
+}
+
+// 退出连续听写时立刻停止轮询，并清空所有窗口高亮。
+async function stopFocusedWindowIndicator() {
+  focusIndicatorRevision += 1
+  if (focusIndicatorTimer) {
+    clearInterval(focusIndicatorTimer)
+    focusIndicatorTimer = null
+  }
+  focusIndicatorKey = ''
+  await clearIndicatorWindows()
 }
 
 async function showCornerIndicators() {
@@ -1274,6 +1446,39 @@ async function captureAndOcrPrimaryDisplay(options = {}) {
   }
 }
 
+// “打开 X” 优先只 OCR 当前焦点窗口，减少整屏 OCR 的范围和误命中。
+async function captureAndOcrFocusedWindow(options = {}) {
+  const backend = normalizeVoiceOcrBackend(options.backend)
+  const snapshot = await windowRegistry.refreshSnapshot()
+  const focusedWindow = snapshot.focusedWindow
+  if (!focusedWindow?.handle) {
+    throw new Error('当前没有可用的焦点窗口')
+  }
+
+  const capturedWindow = await captureWindowImage(focusedWindow.handle)
+  const display = screen.getDisplayMatching(focusedWindow.bounds)
+  const parseResult = await runVoiceOcrWithImage(capturedWindow.imagePath, backend, options)
+
+  return {
+    ocrLines: parseResult.ocrLines || [],
+    lineCount: parseResult.lineCount || 0,
+    imagePath: capturedWindow.imagePath,
+    imageWidth: capturedWindow.width,
+    imageHeight: capturedWindow.height,
+    backend,
+    coordinateSpace: 'window',
+    window: focusedWindow,
+    displayId: display.id,
+    displayBounds: display.bounds,
+    mapImageRectToLogical: (rect) => mapCapturedWindowRectToLogical({
+      windowItem: focusedWindow,
+      imageWidth: capturedWindow.width,
+      imageHeight: capturedWindow.height,
+      rect,
+    }),
+  }
+}
+
 // 候选高亮：在对应屏幕的指示层上画带编号的框；不自动清除，由语音 FSM 控制生命周期。
 async function renderCandidateHighlights({ displayId, items }) {
   const windows = await ensureIndicatorWindows()
@@ -1439,6 +1644,7 @@ app.whenReady().then(async () => {
   })
   voiceRouter = createVoiceActionRouter({
     captureAndOcr: captureAndOcrPrimaryDisplay,
+    captureAndOcrFocusedWindow,
     resolveSpatialMemoryCandidate: async ({ keyword, backend }) => tryResolveCandidateFromSpatialMemory({
       keyword,
       backend,
@@ -1787,6 +1993,11 @@ app.whenReady().then(async () => {
     }
 
     setOverlayState(payload)
+    if (shouldShowFocusIndicatorForOverlay(payload)) {
+      startFocusedWindowIndicator()
+      return
+    }
+    void stopFocusedWindowIndicator()
   })
 
   app.on('activate', () => {
@@ -1805,6 +2016,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   disposeIndicatorWindows()
+  void stopFocusedWindowIndicator()
   void stopDictationSession('app-quit')
   stopManagedSenseVoiceService()
   stopManagedPPOcrService()

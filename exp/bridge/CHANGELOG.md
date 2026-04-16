@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.0.23 焦点窗口 OCR + 连续听写窗口高亮
+
+### Added
+
+- 连续听写新增“当前焦点窗口”黄色高亮框：进入 `listening` 后会在焦点窗口外侧显示 `1px` 黄色边框，并在底部居中显示“当前窗口”标签。
+- 主进程新增 `captureAndOcrFocusedWindow()`，支持先截图当前焦点窗口，再在窗口坐标系内执行 OCR。
+- 主进程新增 `mapCapturedWindowRectToLogical()`，统一把“窗口截图物理像素”换算成“窗口内逻辑坐标 + 全局逻辑坐标”，供高亮、点击和空间记忆复用。
+- `voiceActionRouter` 新增 `VERB_POLICY` 与 `mapOcrPicksToCandidates()`，把触发词语义和不同 OCR 坐标空间的候选映射集中收口。
+
+### Changed
+
+- “打开 / open + 关键词” 现在默认只对当前焦点窗口做 OCR；“点击 / 点一下 / 点下 / click + 关键词” 仍保持整屏 OCR。
+- 候选映射逻辑现在同时支持“整屏 OCR”与“窗口 OCR”两种坐标空间，窗口候选会优先走“窗口句柄 + 窗口内局部坐标”点击。
+- 连续听写期间的窗口高亮改为主进程轮询焦点窗口，并通过常驻透明指示层增量更新，不再复用一次性高亮的展示方式。
+- `extractTrigger()` 不再直接硬编码 `scope`，改为先抽取 `verb + keyword`，再通过 `VERB_POLICY` 决定 OCR 范围，便于后续扩展更多触发动词。
+- README 新增 TODO，记录 overlay 后续迁移到 sidecar overlay 的计划，并补充 macOS 下透明点击穿透 overlay 的实现约束。
+
+### Fixed
+
+- 修复连续听写停止后，已在路上的焦点窗口刷新任务仍可能把高亮框重新画出来的问题；现在通过 revision 保护丢弃过期刷新结果。
+- 修复高 DPI / 显示器缩放场景下窗口截图只截到左上角一部分的问题；窗口截图脚本在抓图前会先显式提升 DPI awareness。
+- 修复窗口 OCR 与空间记忆点击在高缩放桌面下的局部坐标偏移问题；窗口内点击现在统一使用物理像素 offset。
+
 ## 0.0.22 主进程连续听写会话 + 日志降噪
 
 ### Added

@@ -27,6 +27,9 @@ public struct WINDOWPLACEMENT {
   public RECT rcNormalPosition;
 }
 public static class BridgeWindowApi {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int awareness);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
@@ -49,6 +52,23 @@ public static class BridgeWindowApi {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 }
 "@
+`
+}
+
+function buildEnableDpiAwarenessScript() {
+  return `
+# 窗口截图前先提升 PowerShell 进程的 DPI 感知，避免高缩放下尺寸被系统虚拟化后只截到左上角。
+try {
+  [BridgeWindowApi]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
+} catch {
+  try {
+    [BridgeWindowApi]::SetProcessDpiAwareness(2) | Out-Null
+  } catch {
+    try {
+      [BridgeWindowApi]::SetProcessDPIAware() | Out-Null
+    } catch {}
+  }
+}
 `
 }
 
@@ -233,6 +253,7 @@ $hWnd = [IntPtr][Int64]'${safeHandle}'
 if ($hWnd -eq [IntPtr]::Zero) { throw "Invalid window handle" }
 if (-not [BridgeWindowApi]::IsWindow($hWnd)) { throw "Window not found" }
 if ([BridgeWindowApi]::IsIconic($hWnd)) { throw "Window is minimized" }
+${buildEnableDpiAwarenessScript()}
 
 $rect = New-Object RECT
 [BridgeWindowApi]::GetWindowRect($hWnd, [ref]$rect) | Out-Null

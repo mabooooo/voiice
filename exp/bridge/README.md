@@ -16,6 +16,19 @@
 - 开发者模式窗口详情页支持单独截图当前窗口，并保存到本地截图目录
 - 支持基于 `SenseVoice + OCR` 的本地点选式语音路由：可在 `PP-OCR` 与 `RapidOCR` 之间切换，并可选开启“空间记忆”来加速同窗口重复点击
 
+## TODO
+
+- Overlay 迁移到 sidecar overlay：
+  当前窗口高亮、候选框和连续听写指示层仍由 Electron 顶层透明窗承载，能工作，但仍绑定 Chromium 渲染与 BrowserWindow 生命周期。
+- 这项技术债起于 `v0.0.23`：
+  当时优先验证连续听写、窗口 OCR 和跨屏坐标换算，先复用了现成 Electron 主进程 + renderer 能力，改动最小、联调最快。
+- 当前原因：
+  现方案跨端一致性一般，Windows/macOS 都要分别处理透明窗层级、点击穿透、残影和工作区行为；高频刷新也不如原生 overlay 稳。
+- 计划：
+  保留现有整屏/窗口截图、OCR、点击与坐标换算逻辑，把“只负责显示指示器”的 overlay 下沉到 sidecar；Electron 继续保留设置页、调试页和业务编排。
+- macOS 考虑：
+  目标方案不依赖改第三方窗口边框，而是走原生透明点击穿透 overlay；需要单独处理 Spaces、全屏、Mission Control / Stage Manager 的窗口层级与显示行为。
+
 ## 安全边界
 
 当前实现采用三段式：

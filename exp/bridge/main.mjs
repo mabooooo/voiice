@@ -1386,8 +1386,6 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
 
   const filePath = path.join(tempRoot, `recording-${Date.now()}.${extension}`)
   await fsPromises.writeFile(filePath, Buffer.from(bytes))
-  // 终端诊断：看到这里说明 renderer 已经成功把一段音频封包并通过 IPC 落盘。
-  console.log(`[audio] saved temp recording mime=${mimeType || 'unknown'} bytes=${bytes?.length || 0} path=${filePath}`)
   return filePath
 }
 
@@ -1405,7 +1403,6 @@ function logVoiceMessage(message) {
 
 // 本地语音入口统一收口到这里，避免快捷键链路和主进程连续听写各自维护一份逻辑。
 async function handleVoiceAudioPayload(payload = {}) {
-  console.log(`[voice] ASR start file=${payload.filePath || ''} lang=${payload.language || 'auto'} ocr=${normalizeVoiceOcrBackend(payload.ocrBackend)} spatial=${Boolean(payload.spatialMemoryEnabled)}`)
   await ensureManagedSenseVoiceServiceReady()
   // language 由 renderer 或主进程听写会话透传过来（auto / zh / en / ja / ko / yue）。
   const asr = await transcribeSenseVoiceAudio(payload.filePath, {
@@ -1413,12 +1410,10 @@ async function handleVoiceAudioPayload(payload = {}) {
     language: payload.language,
   })
   const transcript = String(asr.text || '').trim()
-  console.log(`[voice] ASR done text="${transcript}" latency=${asr.localLatencyMs ?? '-'}ms converted=${Boolean(asr.convertedToWav)}`)
   const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
     backend: normalizeVoiceOcrBackend(payload.ocrBackend),
     spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
   }) : { handled: false, reason: 'router-missing' }
-  console.log(`[voice] route handled=${Boolean(routed?.handled)} reason=${routed?.reason || ''} phase=${voiceRouter?.getState()?.phase || 'idle'}`)
   return { transcript, asr, routed, state: voiceRouter?.getState() }
 }
 

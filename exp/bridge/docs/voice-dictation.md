@@ -30,7 +30,7 @@
 │          ▼                                                                │
 │  AudioContext + ScriptProcessor                                           │
 │          │                                                                │
-│          │  重采样到 16kHz，按 100ms 拼成一块 Float32 PCM                 │
+│          │  重采样到 16kHz，按 100ms 拼成一块 Int16 PCM                   │
 │          ▼                                                                │
 │  bridge:dictation-session-push-chunk({ sessionId, sampleRate, samples })  │
 │                          │                                                 │
@@ -41,10 +41,12 @@
 │                                                                          │
 │  MainDictationSession                                                    │
 │    1. 维护 pre-roll / 当前句缓存                                          │
-│    2. 用自适应 RMS + peak + 尾部静音做轻量断句                           │
-│    3. encodeWavPcm16(samples)                                            │
-│    4. saveRecordingToTemp() -> os.tmpdir()/voice-bridge-recordings/*.wav │
-│    5. handleVoiceAudioPayload()                                          │
+│    2. Int16 -> Float32，仅在主进程内做 RMS / peak 计算                   │
+│    3. 用自适应 RMS + peak + 尾部静音做轻量断句                           │
+│    4. 对 160~220ms 的短句用 peakRms 做额外放行                           │
+│    5. encodeWavPcm16(samples)                                            │
+│    6. saveRecordingToTemp() -> os.tmpdir()/voice-bridge-recordings/*.wav │
+│    7. handleVoiceAudioPayload()                                          │
 │         - ensureManagedSenseVoiceServiceReady()                          │
 │         - transcribeSenseVoiceAudio(filePath, { language })             │
 │         - voiceRouter.handleTranscript(...)                             │
@@ -74,9 +76,11 @@ renderer 侧采集器。职责只有三件事：
 
 - `getUserMedia` 申请麦克风，关闭 AGC / NS / EC。
 - 用 `AudioContext + ScriptProcessor` 读取原始音频，并重采样到 `16kHz mono`。
-- 按固定 `100ms` chunk 通过 `bridge:dictation-session-push-chunk` 推给主进程。
+- 把每个 `100ms` chunk 压成 `Int16Array`，再通过 `bridge:dictation-session-push-chunk` 推给主进程，降低 IPC 带宽。
 
 它不再负责 VAD、断句、WAV 封包，也不直接触发 ASR。
+
+当前仍然使用 `ScriptProcessor`，原因是它足够简单、当前目标只是稳定收样本。后续若要进一步降低主线程抖动带来的毛刺风险，可把这一层替换成“只做收样本 + 100ms postMessage”的最小 `AudioWorklet`。
 
 ### `src/dictationSession.mjs`
 
@@ -85,8 +89,10 @@ renderer 侧采集器。职责只有三件事：
 - `idle / in / post` 三态切换全部在主进程完成。
 - `idle` 时持续维护 `pre-roll`，避免句首起音被截掉。
 - 用 `noiseRms` 自适应更新噪声基线，再结合 `rms + peak` 判断是否进入/维持语音。
+- 默认 `220ms` 以下短句丢弃；但 `160~220ms` 之间若 `peakRms` 足够高，会放行“嗯 / 对 / 好”这类明显短应答。
 - 句尾通过 `END_SILENCE_MS` 判定封句；手动停止时会 flush 最后一句。
 - 每句在主进程里直接编码成 `wav`，随后走既有 `SenseVoice -> voiceRouter` 链路。
+- `pendingWork` 会把每句的 ASR 和路由串行排队，避免 SenseVoice 慢时多句并发返回，打乱 `voiceRouter` 的 FSM 状态。
 
 这一层把“连续听写状态”从 renderer 收回到了主进程，便于排查和后续继续替换成更强的 VAD。
 
@@ -129,21 +135,23 @@ UI 层的职责：
 | --- | --- | --- |
 | `sampleRate` | `16000` | renderer 推给主进程的目标采样率 |
 | `chunkDurationMs` | `100` | renderer 每次推送给主进程的 PCM 分块时长 |
-| `preRollMs` | `240` | 主进程进入一句话前往回补的原始音频 |
+| `preRollMs` | `320` | 主进程进入一句话前往回补的原始音频 |
 | `endSilenceMs` | `680` | 尾部静音超过多久后封句 |
-| `minUtteranceMs` | `220` | 小于该长度的句子直接丢弃 |
+| `shortUtteranceMinMs` | `160` | 小于该长度的短句直接丢弃 |
+| `minUtteranceMs` | `220` | 常规短句门槛；低于该值时需要额外看 `peakRms` |
 | `maxUtteranceMs` | `15000` | 单句上限，防跑飞 |
 | `noiseRmsFloor` | `0.003` | 主进程噪声基线下限 |
 | `enterMultiplier` | `2.4` | 进入语音时，RMS 相对噪声基线的放大倍数 |
 | `exitMultiplier` | `1.7` | 维持语音时，RMS 相对噪声基线的放大倍数 |
 | `enterPeakFloor` | `0.06` | 启动语音的 peak 兜底阈值 |
 | `exitPeakFloor` | `0.04` | 维持语音的 peak 兜底阈值 |
+| `shortUtterancePeakRmsGate` | `0.12` | `160~220ms` 短句放行阈值，当前等于 `2 × enterPeakFloor` |
 
 调优建议：
 
 - 环境偏吵：优先增大 `enterMultiplier` 或 `enterPeakFloor`，让主进程更保守地进入语音态。
 - 用户说话节奏慢、停顿多：把 `endSilenceMs` 调到 `850~1000`，避免一句话被拆成多句。
-- 经常漏掉很短的口语指令：把 `minUtteranceMs` 降到 `160~180`，同时观察误触发是否明显上升。
+- 经常漏掉很短的口语指令：先观察 `peakRms` 是否明显低于 `0.12`；如果确实偏低，再下调 `shortUtterancePeakRmsGate`，比直接拉低 `minUtteranceMs` 更稳。
 
 ## 四、首选语言
 
@@ -157,12 +165,20 @@ SenseVoiceSmall 支持 `auto / zh / en / ja / ko / yue`。
 ## 五、常见问题与排错
 
 - **说话完全没有反应**：先看 renderer 是否有 `PCM capture ready`，再看主进程是否有 `session started` / `queue utterance`；前者没有说明采集没跑，后者没有说明主进程断句阈值没打到。
-- **"嗯 / 对"经常被吞**：降低 `minUtteranceMs`，必要时同时降低 `enterMultiplier` 或 `enterPeakFloor`。
+- **"嗯 / 对"经常被吞**：先看 `drop short utterance` 日志里的 `peakRms`；若接近 `0.12`，优先微调 `shortUtterancePeakRmsGate`，再考虑下调 `minUtteranceMs`。
 - **句子被拆成两段**：把 `endSilenceMs` 调大到 `900` 左右；或者用户语速很慢时增大 `maxUtteranceMs`。
 - **麦克风被后台占用**：`stopDictationMode` 没有被调到。切换设置开关、或关闭窗口都会走 `dictationHandleRef.current.stop()` 释放。如果发现泄漏，检查 `useEffect` 卸载钩子。
 - **终端日志太多**：当前已经关闭主进程高频 `phase -> ...` 日志，overlay 也只在文字语义变化时打印；若仍嫌多，可继续收敛 `speech start / drop short utterance / queue utterance` 这类诊断日志。
 
-## 六、与现有链路的关系
+## 六、边界行为
+
+- `push-chunk` 在 `session-start` 之前到达：直接丢弃，不排队。
+- `push-chunk` 在 `session-stop` 之后到达：直接丢弃，不排队。
+- 同一时刻重复 `session-start`：主进程会先停止旧 session，再创建新 session，行为是覆盖，不是忽略。
+- 同一 `sessionId` 的 ASR / 路由任务：当前通过 `pendingWork` 串行执行，避免返回乱序冲击 `voiceRouter` 的 FSM。
+- `voice-bridge-recordings/*.wav`：当前只负责写入临时目录，不做主动清理，依赖系统临时目录回收；如果后续积累明显，再单独补清理策略。
+
+## 七、与现有链路的关系
 
 | 入口 | 链路 |
 | --- | --- |

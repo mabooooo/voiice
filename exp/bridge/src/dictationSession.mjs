@@ -1,6 +1,7 @@
 const DEFAULT_SAMPLE_RATE = 16000
-const PRE_ROLL_MS = 240
+const PRE_ROLL_MS = 320
 const END_SILENCE_MS = 680
+const SHORT_UTTERANCE_MIN_MS = 160
 const MIN_UTTERANCE_MS = 220
 const MAX_UTTERANCE_MS = 15000
 const NOISE_RMS_FLOOR = 0.003
@@ -41,6 +42,7 @@ export class MainDictationSession {
     this.utteranceChunks = []
     this.utteranceSamples = 0
     this.trailingSilenceSamples = 0
+    this.utterancePeakRms = 0
     this.utteranceSeq = 0
     this.pendingWork = Promise.resolve()
     this.stopped = false
@@ -49,7 +51,7 @@ export class MainDictationSession {
   // renderer 每推来一块 PCM，就在主进程里做一次轻量能量判定。
   pushChunk(rawSamples, sampleRate = DEFAULT_SAMPLE_RATE) {
     if (this.stopped) return
-    const samples = normalizeFloat32Array(rawSamples)
+    const samples = normalizePcmSamples(rawSamples)
     if (!samples.length) return
     this.sampleRate = Number.isFinite(sampleRate) ? sampleRate : DEFAULT_SAMPLE_RATE
 
@@ -73,7 +75,6 @@ export class MainDictationSession {
 
     await this.pendingWork
     this.emit('stopped', { reason })
-    this.log(`session stopped reason=${reason}`)
   }
 
   handleFrame(samples, stats) {
@@ -86,13 +87,13 @@ export class MainDictationSession {
         this.updateNoiseFloor(stats)
         return
       }
-      this.beginUtterance(samples)
+      this.beginUtterance(samples, stats)
       this.setPhase('in', 'speech-start')
       return
     }
 
     if (this.phase === 'in') {
-      this.appendUtterance(samples, { isSpeech: keepSpeech })
+      this.appendUtterance(samples, { isSpeech: keepSpeech, rms: stats.rms })
       if (keepSpeech) {
         if (this.getUtteranceDurationMs() >= MAX_UTTERANCE_MS) {
           this.finalizeUtterance('max-duration')
@@ -107,7 +108,7 @@ export class MainDictationSession {
     }
 
     if (keepSpeech) {
-      this.appendUtterance(samples, { isSpeech: true })
+      this.appendUtterance(samples, { isSpeech: true, rms: stats.rms })
       this.setPhase('in', 'speech-resume')
       if (this.getUtteranceDurationMs() >= MAX_UTTERANCE_MS) {
         this.finalizeUtterance('max-duration')
@@ -115,27 +116,28 @@ export class MainDictationSession {
       return
     }
 
-    this.appendUtterance(samples, { isSpeech: false })
+    this.appendUtterance(samples, { isSpeech: false, rms: stats.rms })
     if (this.getTrailingSilenceMs() >= END_SILENCE_MS) {
       this.finalizeUtterance('end-silence')
     }
   }
 
-  beginUtterance(firstSpeechChunk) {
+  beginUtterance(firstSpeechChunk, stats) {
     // 开句时先把 pre-roll 拼进去，减少“点/开”这类短起音被截掉。
     this.utteranceChunks = this.preRollChunks.map(chunk => chunk.slice(0))
     this.utteranceSamples = this.preRollSamples
     this.trailingSilenceSamples = 0
+    this.utterancePeakRms = 0
     this.preRollChunks = []
     this.preRollSamples = 0
-    this.appendUtterance(firstSpeechChunk, { isSpeech: true })
-    this.log(`speech start rms=${measureSamples(firstSpeechChunk).rms.toFixed(4)} noise=${this.noiseRms.toFixed(4)}`)
+    this.appendUtterance(firstSpeechChunk, { isSpeech: true, rms: stats?.rms ?? 0 })
   }
 
-  appendUtterance(samples, { isSpeech }) {
+  appendUtterance(samples, { isSpeech, rms = 0 }) {
     this.utteranceChunks.push(samples.slice(0))
     this.utteranceSamples += samples.length
     this.trailingSilenceSamples = isSpeech ? 0 : (this.trailingSilenceSamples + samples.length)
+    this.utterancePeakRms = Math.max(this.utterancePeakRms, rms)
   }
 
   finalizeUtterance(reason, { trimTrailingSilence = true } = {}) {
@@ -150,18 +152,17 @@ export class MainDictationSession {
     const effectiveSamples = Math.max(0, totalSamples - trimmedTrailingSamples)
     const durationMs = samplesToMs(effectiveSamples, this.sampleRate)
     const merged = mergeChunks(this.utteranceChunks, effectiveSamples)
+    const utterancePeakRms = this.utterancePeakRms
 
     this.resetUtteranceState()
     this.setPhase('idle', reason)
 
-    if (durationMs < MIN_UTTERANCE_MS || merged.length === 0) {
-      this.log(`drop short utterance reason=${reason} duration=${durationMs.toFixed(0)}ms`)
+    if (!this.shouldKeepUtterance(durationMs, merged.length, utterancePeakRms)) {
       this.emit('dropped', { reason, durationMs })
       return
     }
 
     const seq = ++this.utteranceSeq
-    this.log(`queue utterance #${seq} reason=${reason} duration=${durationMs.toFixed(0)}ms samples=${merged.length}`)
     this.emit('queued', { seq, reason, durationMs })
 
     this.pendingWork = this.pendingWork.then(async () => {
@@ -184,7 +185,6 @@ export class MainDictationSession {
         action: result?.routed?.action || (result?.routed?.handled ? 'handled' : 'no-trigger'),
         phase: result?.state?.phase || 'idle',
       })
-      this.log(`utterance #${seq} done transcript="${String(result?.transcript || '').trim()}"`)
     }).catch((error) => {
       const message = String(error?.message || error)
       this.emit('error', { stage: 'route', message })
@@ -237,10 +237,19 @@ export class MainDictationSession {
     this.emit('phase', { phase: nextPhase, reason })
   }
 
+  // 对 160~220ms 的极短应答用“能量显著度”开一道口，减少“嗯/对/好”被整体吞掉。
+  shouldKeepUtterance(durationMs, sampleLength, utterancePeakRms) {
+    if (sampleLength <= 0) return false
+    if (durationMs >= MIN_UTTERANCE_MS) return true
+    if (durationMs < SHORT_UTTERANCE_MIN_MS) return false
+    return utterancePeakRms >= (ENTER_PEAK_FLOOR * 2)
+  }
+
   resetUtteranceState() {
     this.utteranceChunks = []
     this.utteranceSamples = 0
     this.trailingSilenceSamples = 0
+    this.utterancePeakRms = 0
   }
 
   emit(type, payload = {}) {
@@ -256,11 +265,30 @@ export class MainDictationSession {
   }
 }
 
-function normalizeFloat32Array(value) {
+function normalizePcmSamples(value) {
   if (value instanceof Float32Array) return value
-  if (ArrayBuffer.isView(value)) return new Float32Array(value.buffer, value.byteOffset, value.byteLength / Float32Array.BYTES_PER_ELEMENT)
-  if (Array.isArray(value)) return Float32Array.from(value)
+  if (value instanceof Int16Array) return int16ToFloat32(value)
+  if (ArrayBuffer.isView(value)) return normalizePcmSamples(viewToTypedArray(value))
+  if (Array.isArray(value)) {
+    if (value.length > 0 && Number.isInteger(value[0])) return int16ToFloat32(Int16Array.from(value))
+    return Float32Array.from(value)
+  }
   return new Float32Array(0)
+}
+
+function viewToTypedArray(view) {
+  if (view?.BYTES_PER_ELEMENT === Int16Array.BYTES_PER_ELEMENT) {
+    return new Int16Array(view.buffer, view.byteOffset, view.byteLength / Int16Array.BYTES_PER_ELEMENT)
+  }
+  return new Float32Array(view.buffer, view.byteOffset, view.byteLength / Float32Array.BYTES_PER_ELEMENT)
+}
+
+function int16ToFloat32(samples) {
+  const output = new Float32Array(samples.length)
+  for (let index = 0; index < samples.length; index += 1) {
+    output[index] = samples[index] / (samples[index] < 0 ? 0x8000 : 0x7fff)
+  }
+  return output
 }
 
 function measureSamples(samples) {

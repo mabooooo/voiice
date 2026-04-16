@@ -14,6 +14,9 @@
 - `main.mjs` 新增 `bridge:dictation-session-start / push-chunk / stop` IPC，并把本地语音入口收口到 `handleVoiceAudioPayload()`，避免连续听写和普通右 `Alt` 路径维护两套 ASR 路由逻辑。
 - [docs/voice-dictation.md](D:/Projects/AI/voiice/exp/bridge/docs/voice-dictation.md) 更新为当前主进程连续听写架构，补充了新边界、参数和排查方式。
 - overlay 日志现在只在 `status / title / subtitle` 发生实际变化时打印，不再因电平刷新而在终端重复刷屏。
+- renderer -> main 的连续听写 IPC 音频块从 `Float32` 改为 `Int16`，降低带宽占用；主进程收到后再转回 `Float32` 做 RMS / peak 判定。
+- 主进程短句门控新增 `160~220ms + peakRms` 放行逻辑，减少“嗯 / 对 / 好”这类短应答被整体吞掉。
+- 主进程 `pre-roll` 从 `240ms` 上调到 `320ms`，减少“点击 / 打开”这类起音被截短后影响 ASR 的概率。
 
 ### Removed
 

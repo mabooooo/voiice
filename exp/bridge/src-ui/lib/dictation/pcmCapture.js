@@ -89,7 +89,8 @@ export async function startDictationPcmCapture({
         readOffset += takeCount
 
         if (chunkOffset >= CHUNK_SIZE) {
-          const emitted = chunkBuffer.slice(0)
+          // IPC 直接发 Int16，带宽相比 Float32 减半，且对语音质量无损。
+          const emitted = float32ToInt16(chunkBuffer)
           chunkBuffer = new Float32Array(CHUNK_SIZE)
           chunkOffset = 0
           Promise.resolve(onChunk(emitted)).catch((error) => {
@@ -146,4 +147,13 @@ function computeLevel(samples) {
   }
   const rms = samples.length > 0 ? Math.sqrt(sumSquares / samples.length) : 0
   return Math.min(1, rms * 10)
+}
+
+function float32ToInt16(samples) {
+  const output = new Int16Array(samples.length)
+  for (let index = 0; index < samples.length; index += 1) {
+    const clamped = Math.max(-1, Math.min(1, samples[index]))
+    output[index] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff
+  }
+  return output
 }

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.24 坐标换算封装 + 点击定位收口
+
+### Added
+
+- 新增 [src/screenCoordinates.mjs](D:/Projects/AI/voiice/exp/bridge/src/screenCoordinates.mjs)，集中封装整屏截图、窗口截图、窗口相对记忆与点击落点之间的坐标换算。
+- 新增 `mapWindowImageRect()`、`mapFullScreenImageRect()`、`globalLogicalRectToRelative()`、`relativeRectToWindowLocal()` 与 `buildClickTargetFromSpaces()`，把“物理像素 / 逻辑像素 / overlay 坐标 / 点击坐标”统一到同一套工具函数。
+
+### Changed
+
+- `main.mjs` 的空间记忆命中、窗口 OCR 和整屏 OCR 结果现在统一走 `screenCoordinates.mjs`，不再在业务代码里分别手写缩放和坐标换算。
+- `voiceActionRouter` 现在只消费 `mapImageRectToSpaces()` 返回的空间信息，再由 `buildClickTargetFromSpaces()` 组装候选点击目标，路由层不再关心具体坐标空间。
+- 空间记忆回写时，窗口 OCR 命中的矩形改为先还原到全局逻辑坐标，再统一转成窗口相对比例，减少不同入口下记忆格式不一致的问题。
+
+### Fixed
+
+- 修复窗口 OCR、空间记忆点击与候选高亮之间各自维护坐标换算时容易出现的重复逻辑和偏移风险。
+- 修复高缩放场景下，窗口内候选中心点、空间记忆命中点与最终点击落点不完全一致的问题；现在窗口点击统一以窗口截图物理像素中心为准。
+
 ## 0.0.23 焦点窗口 OCR + 连续听写窗口高亮
 
 ### Added

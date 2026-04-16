@@ -19,6 +19,13 @@ import { testRapidOcrWithImage } from './src/rapidOcrClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
+import {
+  buildClickTargetFromSpaces,
+  globalLogicalRectToRelative,
+  mapFullScreenImageRect,
+  mapWindowImageRect,
+  relativeRectToWindowLocal,
+} from './src/screenCoordinates.mjs'
 import { createVoiceActionRouter, pickCandidates } from './src/voiceActionRouter.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
@@ -192,48 +199,7 @@ function buildScreenRectFromCandidate(target) {
   return { left, top, width, height }
 }
 
-function buildRelativeRectFromLogicalRect(logicalRect, windowBounds) {
-  if (!logicalRect || !windowBounds?.width || !windowBounds?.height) {
-    return null
-  }
-
-  return {
-    x: clamp((logicalRect.left - windowBounds.x) / windowBounds.width, 0, 1),
-    y: clamp((logicalRect.top - windowBounds.y) / windowBounds.height, 0, 1),
-    width: clamp(logicalRect.width / windowBounds.width, 0, 1),
-    height: clamp(logicalRect.height / windowBounds.height, 0, 1),
-  }
-}
-
-// 把“窗口截图里的像素坐标”统一换算成“窗口内逻辑坐标 + 全局逻辑坐标”，
-// 后续高亮、点击和空间记忆都可以复用这套映射。
-function mapCapturedWindowRectToLogical({ windowItem, imageWidth, imageHeight, rect }) {
-  if (!windowItem?.bounds?.width || !windowItem?.bounds?.height || !imageWidth || !imageHeight || !rect) {
-    return null
-  }
-
-  const scaleX = imageWidth / Math.max(1, windowItem.bounds.width)
-  const scaleY = imageHeight / Math.max(1, windowItem.bounds.height)
-  const width = Math.max(1, rect.width / scaleX)
-  const height = Math.max(1, rect.height / scaleY)
-  const localLeft = rect.x / scaleX
-  const localTop = rect.y / scaleY
-
-  return {
-    localRect: {
-      left: localLeft,
-      top: localTop,
-      width,
-      height,
-    },
-    logicalRect: {
-      left: windowItem.bounds.x + localLeft,
-      top: windowItem.bounds.y + localTop,
-      width,
-      height,
-    },
-  }
-}
+// 空间记忆 / 高亮 / 点击之间的坐标换算统一在 src/screenCoordinates.mjs，这里只保留业务语义的薄封装。
 
 async function runVoiceOcrWithImage(imagePath, backend, options = {}) {
   const normalizedBackend = normalizeVoiceOcrBackend(backend)
@@ -270,15 +236,8 @@ async function cropImageToFile(sourcePath, cropRect, outputPath) {
 
 function buildSearchRectFromMemory(memoryEntry, windowItem) {
   const bounds = windowItem?.bounds
-  const relativeRect = memoryEntry?.relativeRect
-  if (!bounds || !relativeRect) return null
-
-  const currentRect = {
-    x: relativeRect.x * bounds.width,
-    y: relativeRect.y * bounds.height,
-    width: Math.max(24, relativeRect.width * bounds.width),
-    height: Math.max(24, relativeRect.height * bounds.height),
-  }
+  const currentRect = relativeRectToWindowLocal(memoryEntry?.relativeRect, bounds, { minSize: 24 })
+  if (!currentRect) return null
 
   const paddingX = Math.max(SPATIAL_MEMORY_SEARCH_PADDING, currentRect.width * 0.9)
   const paddingY = Math.max(SPATIAL_MEMORY_SEARCH_PADDING, currentRect.height * 0.9)
@@ -359,9 +318,10 @@ async function tryResolveCandidateFromSpatialMemory({ keyword, backend, logger }
 
   const capturedWindow = await captureWindowImage(focusedWindow.handle)
   const cropOutputPath = buildTimestampedPath(capturedWindow.imagePath, 'memory-crop')
-  const scaleX = capturedWindow.width / Math.max(1, focusedWindow.bounds.width)
-  const scaleY = capturedWindow.height / Math.max(1, focusedWindow.bounds.height)
-  // 记忆里保存的是“相对窗口位置”，这里先换算到当前窗口尺寸，再截一个更小的搜索区域。
+  const imageSize = { width: capturedWindow.width, height: capturedWindow.height }
+  const scaleX = imageSize.width / Math.max(1, focusedWindow.bounds.width)
+  const scaleY = imageSize.height / Math.max(1, focusedWindow.bounds.height)
+  // 记忆里保存的是“相对窗口位置”，先换算到当前窗口物理像素，再截一个更小的搜索区域。
   const cropRect = await cropImageToFile(capturedWindow.imagePath, {
     x: searchRect.x * scaleX,
     y: searchRect.y * scaleY,
@@ -378,43 +338,37 @@ async function tryResolveCandidateFromSpatialMemory({ keyword, backend, logger }
 
   const target = picks[0]
   const [x1, y1, x2, y2] = target.bbox
-  const localCx = (x1 + x2) / 2
-  const localCy = (y1 + y2) / 2
-  // OCR 输入是“窗口截图物理像素 -> crop”，所以 (cropRect.x + localCx, cropRect.y + localCy)
-  // 就是按钮在窗口内的“物理像素偏移”。clickWindowLocalPoint 是 DPI-aware 的，必须吃物理 offset。
-  const physicalLocalX = cropRect.x + localCx
-  const physicalLocalY = cropRect.y + localCy
-  // 全局逻辑坐标再除一次 scale，供 findBestWindowForPoint / highlight / fallback clickAt 使用。
-  const windowX = physicalLocalX / scaleX
-  const windowY = physicalLocalY / scaleY
-  const logicalClickX = focusedWindow.bounds.x + windowX
-  const logicalClickY = focusedWindow.bounds.y + windowY
-  const clickX = Math.round(logicalClickX)
-  const clickY = Math.round(logicalClickY)
+  // crop 内 OCR 的 bbox 是 crop 物理像素，加上 cropRect 的 offset 就变回窗口截图物理像素。
+  // 后面交给 mapWindowImageRect 统一换算到各个空间。
+  const windowPhysicalRect = {
+    x: cropRect.x + x1,
+    y: cropRect.y + y1,
+    width: Math.max(1, x2 - x1),
+    height: Math.max(1, y2 - y1),
+  }
+  const display = screen.getDisplayMatching(focusedWindow.bounds)
+  const spaces = mapWindowImageRect({
+    rect: windowPhysicalRect,
+    windowBounds: focusedWindow.bounds,
+    imageSize,
+    displayBounds: display?.bounds,
+  })
+  const clickTarget = buildClickTargetFromSpaces(spaces, { windowHandle: focusedWindow.handle })
 
-  logger?.(`[voice] spatial-memory hit: ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title} -> logical=(${clickX},${clickY}) localPhysical=(${Math.round(physicalLocalX)},${Math.round(physicalLocalY)})`)
+  logger?.(`[voice] spatial-memory hit: ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title} -> logical=(${clickTarget.clickX},${clickTarget.clickY}) localPhysical=(${clickTarget.localClickX},${clickTarget.localClickY})`)
   return {
     index: 1,
     text: target.text,
     bbox: [
-      Math.round(focusedWindow.bounds.x + windowX - ((x2 - x1) / scaleX) / 2),
-      Math.round(focusedWindow.bounds.y + windowY - ((y2 - y1) / scaleY) / 2),
-      Math.round(focusedWindow.bounds.x + windowX + ((x2 - x1) / scaleX) / 2),
-      Math.round(focusedWindow.bounds.y + windowY + ((y2 - y1) / scaleY) / 2),
+      Math.round(spaces.globalLogical.left),
+      Math.round(spaces.globalLogical.top),
+      Math.round(spaces.globalLogical.left + spaces.globalLogical.width),
+      Math.round(spaces.globalLogical.top + spaces.globalLogical.height),
     ],
-    clickX,
-    clickY,
-    windowHandle: focusedWindow.handle,
-    localClickX: Math.round(physicalLocalX),
-    localClickY: Math.round(physicalLocalY),
+    ...clickTarget,
     source: 'spatial-memory',
     window: focusedWindow,
-    logicalRect: {
-      left: focusedWindow.bounds.x + searchRect.x + (x1 / scaleX),
-      top: focusedWindow.bounds.y + searchRect.y + (y1 / scaleY),
-      width: Math.max(1, (x2 - x1) / scaleX),
-      height: Math.max(1, (y2 - y1) / scaleY),
-    },
+    logicalRect: spaces.globalLogical,
   }
 }
 
@@ -443,13 +397,15 @@ async function rememberSpatialSelection({ keyword, target, backend, mode, logger
     const windowPicks = pickCandidates(windowOcr.ocrLines, keyword, 3)
     if (windowPicks.length > 0) {
       const [x1, y1, x2, y2] = windowPicks[0].bbox
-      relativeRect = {
-        x: clamp(x1 / Math.max(1, capturedWindow.width), 0, 1),
-        y: clamp(y1 / Math.max(1, capturedWindow.height), 0, 1),
-        width: clamp((x2 - x1) / Math.max(1, capturedWindow.width), 0, 1),
-        height: clamp((y2 - y1) / Math.max(1, capturedWindow.height), 0, 1),
+      const spaces = mapWindowImageRect({
+        rect: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
+        windowBounds: hostWindow.bounds,
+        imageSize: { width: capturedWindow.width, height: capturedWindow.height },
+      })
+      relativeRect = globalLogicalRectToRelative(spaces?.globalLogical, hostWindow.bounds)
+      if (relativeRect) {
+        logger?.('[voice] spatial-memory save source: window-ocr')
       }
-      logger?.('[voice] spatial-memory save source: window-ocr')
     }
   } catch (error) {
     logger?.(`[voice] spatial-memory window-ocr failed: ${error.message || error}`)
@@ -457,8 +413,7 @@ async function rememberSpatialSelection({ keyword, target, backend, mode, logger
 
   if (!relativeRect) {
     // 窗口内 OCR 失败时，再回退到之前的逻辑坐标换算。
-    const logicalRect = target.logicalRect || null
-    relativeRect = buildRelativeRectFromLogicalRect(logicalRect, hostWindow.bounds)
+    relativeRect = globalLogicalRectToRelative(target.logicalRect || null, hostWindow.bounds)
     if (relativeRect) {
       logger?.('[voice] spatial-memory save source: logical-rect fallback')
     }
@@ -471,11 +426,15 @@ async function rememberSpatialSelection({ keyword, target, backend, mode, logger
       return null
     }
     logger?.('[voice] spatial-memory save source: screen-rect fallback')
-    relativeRect = {
-      x: clamp((screenRect.left - hostWindow.bounds.x) / hostWindow.bounds.width, 0, 1),
-      y: clamp((screenRect.top - hostWindow.bounds.y) / hostWindow.bounds.height, 0, 1),
-      width: clamp(screenRect.width / hostWindow.bounds.width, 0, 1),
-      height: clamp(screenRect.height / hostWindow.bounds.height, 0, 1),
+    relativeRect = globalLogicalRectToRelative({
+      left: screenRect.left,
+      top: screenRect.top,
+      width: screenRect.width,
+      height: screenRect.height,
+    }, hostWindow.bounds)
+    if (!relativeRect) {
+      logger?.('[voice] spatial-memory skip: relative rect conversion failed')
+      return null
     }
   }
 
@@ -1411,7 +1370,7 @@ async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suff
   return outputPath
 }
 
-// 语音点击链路统一从这里切换 OCR 后端，返回同一套坐标换算元数据给路由器。
+// 语音点击链路统一从这里切换 OCR 后端，统一吐出 mapImageRectToSpaces，路由侧不再关心坐标空间。
 async function captureAndOcrPrimaryDisplay(options = {}) {
   const backend = normalizeVoiceOcrBackend(options.backend)
   const captureStartAt = Date.now()
@@ -1425,9 +1384,7 @@ async function captureAndOcrPrimaryDisplay(options = {}) {
   console.log(`[${new Date().toISOString()}] [voice] capture completed in ${Date.now() - captureStartAt}ms: ${item.savedPath}`)
 
   const display = screen.getAllDisplays().find(d => d.id === item.displayId) || screen.getPrimaryDisplay()
-  const logicalWidth = display.bounds.width
-  const scaleFactor = item.width / Math.max(1, logicalWidth)
-  const origin = display.nativeOrigin || display.bounds
+  const imageSize = { width: item.width, height: item.height }
 
   const parseResult = await runVoiceOcrWithImage(item.savedPath, backend, options)
 
@@ -1439,10 +1396,9 @@ async function captureAndOcrPrimaryDisplay(options = {}) {
     imageHeight: item.height,
     displayId: display.id,
     displayBounds: display.bounds,
-    scaleFactor,
-    originX: Math.round(origin.x),
-    originY: Math.round(origin.y),
     backend,
+    windowHandle: null,
+    mapImageRectToSpaces: (rect) => mapFullScreenImageRect({ rect, display, imageSize }),
   }
 }
 
@@ -1457,6 +1413,7 @@ async function captureAndOcrFocusedWindow(options = {}) {
 
   const capturedWindow = await captureWindowImage(focusedWindow.handle)
   const display = screen.getDisplayMatching(focusedWindow.bounds)
+  const imageSize = { width: capturedWindow.width, height: capturedWindow.height }
   const parseResult = await runVoiceOcrWithImage(capturedWindow.imagePath, backend, options)
 
   return {
@@ -1466,15 +1423,15 @@ async function captureAndOcrFocusedWindow(options = {}) {
     imageWidth: capturedWindow.width,
     imageHeight: capturedWindow.height,
     backend,
-    coordinateSpace: 'window',
     window: focusedWindow,
+    windowHandle: focusedWindow.handle,
     displayId: display.id,
     displayBounds: display.bounds,
-    mapImageRectToLogical: (rect) => mapCapturedWindowRectToLogical({
-      windowItem: focusedWindow,
-      imageWidth: capturedWindow.width,
-      imageHeight: capturedWindow.height,
+    mapImageRectToSpaces: (rect) => mapWindowImageRect({
       rect,
+      windowBounds: focusedWindow.bounds,
+      imageSize,
+      displayBounds: display?.bounds,
     }),
   }
 }

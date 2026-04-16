@@ -3,6 +3,9 @@
 // await_selection：等待数字（1-9 / 一 二 ... / 第几个） → 根据候选执行点击
 //
 // FSM 只存在主进程内存，依赖由 main.mjs 注入（截图、OCR、高亮、点击、日志）。
+// 坐标换算全部封装在 src/screenCoordinates.mjs：路由器只关心"语义候选 -> 点击目标"。
+
+import { buildClickTargetFromSpaces } from './screenCoordinates.mjs'
 
 const TRIGGER_REGEX = /(点击|点一下|点下|打开|open|click)\s*[“”"'「『\[]?\s*([^“”"'」』\]。，,.!！?？\s]+)/i
 const VERB_POLICY = {
@@ -146,83 +149,48 @@ export function createVoiceActionRouter(deps) {
     state.timer = setTimeout(() => reset('timeout'), AWAIT_TIMEOUT_MS)
   }
 
-  // 同一套 pick 结果在不同 OCR 空间下复用：整屏 OCR 直接映射到全局，窗口 OCR 则先映射到窗口坐标再换到全局。
+  // 所有坐标空间由 ocr.mapImageRectToSpaces 负责（window OCR / 整屏 OCR 走同一接口）。
+  // 路由器只把空间信息拼成候选需要的 { clickX/Y, localClickX/Y, logicalRect, overlayRect }。
   function mapOcrPicksToCandidates(ocr, picks) {
+    const source = ocr.windowHandle ? 'focused-window-ocr' : 'full-ocr'
     return picks.map((item, index) => {
       const [x1, y1, x2, y2] = item.bbox
-      const cx = (x1 + x2) / 2
-      const cy = (y1 + y2) / 2
+      const spaces = ocr.mapImageRectToSpaces?.({
+        x: x1,
+        y: y1,
+        width: x2 - x1,
+        height: y2 - y1,
+      })
+      if (!spaces) return null
 
-      if (ocr.coordinateSpace === 'window') {
-        const windowItem = ocr.window
-        const mappedRect = ocr.mapImageRectToLogical?.({
-          x: x1,
-          y: y1,
-          width: x2 - x1,
-          height: y2 - y1,
-        })
-        const localLeft = mappedRect?.localRect?.left ?? 0
-        const localTop = mappedRect?.localRect?.top ?? 0
-        const localWidth = Math.max(1, mappedRect?.localRect?.width ?? 1)
-        const localHeight = Math.max(1, mappedRect?.localRect?.height ?? 1)
-        const logicalLeft = mappedRect?.logicalRect?.left ?? windowItem.bounds.x
-        const logicalTop = mappedRect?.logicalRect?.top ?? windowItem.bounds.y
-        // clickWindowLocalPoint 是 DPI-aware 的：它读取的是窗口的“物理”矩形，
-        // 再按原样把 offset 加到 rect.Left / Top，所以这里必须给“物理”像素。
-        // OCR bbox 就来自窗口截图的物理像素，bbox 中心本身就是正确的物理 offset，
-        // 不要再除 scaleFactor，否则高 DPI 下会按缩放比点偏。
-        const physicalLocalClickX = cx
-        const physicalLocalClickY = cy
-
-        return {
-          index: index + 1,
-          text: item.text,
-          bbox: item.bbox,
-          source: 'focused-window-ocr',
-          windowHandle: windowItem.handle,
-          localClickX: Math.round(physicalLocalClickX),
-          localClickY: Math.round(physicalLocalClickY),
-          logicalRect: {
-            left: logicalLeft,
-            top: logicalTop,
-            width: localWidth,
-            height: localHeight,
-          },
-          overlayRect: {
-            left: Math.round(logicalLeft - (ocr.displayBounds?.x || 0)),
-            top: Math.round(logicalTop - (ocr.displayBounds?.y || 0)),
-            width: Math.max(1, Math.round(localWidth)),
-            height: Math.max(1, Math.round(localHeight)),
-          },
-          // clickX / clickY 留着给 findBestWindowForPoint 和非窗口点击兜底，保持“全局逻辑像素”。
-          clickX: Math.round(logicalLeft + localWidth / 2),
-          clickY: Math.round(logicalTop + localHeight / 2),
+      const clickTarget = buildClickTargetFromSpaces(spaces, { windowHandle: ocr.windowHandle })
+      // 整屏 OCR 没有显示器相对的 overlay，用 globalLogical 减去 displayBounds 兜底。
+      const overlay = spaces.overlay || (ocr.displayBounds
+        ? {
+          left: spaces.globalLogical.left - ocr.displayBounds.x,
+          top: spaces.globalLogical.top - ocr.displayBounds.y,
+          width: spaces.globalLogical.width,
+          height: spaces.globalLogical.height,
         }
-      }
+        : null)
 
-      const logicalWidth = Math.max(1, (x2 - x1) / ocr.scaleFactor)
-      const logicalHeight = Math.max(1, (y2 - y1) / ocr.scaleFactor)
       return {
         index: index + 1,
         text: item.text,
         bbox: item.bbox,
-        source: 'full-ocr',
-        logicalRect: {
-          left: (ocr.displayBounds?.x || 0) + (x1 / ocr.scaleFactor),
-          top: (ocr.displayBounds?.y || 0) + (y1 / ocr.scaleFactor),
-          width: logicalWidth,
-          height: logicalHeight,
-        },
-        overlayRect: {
-          left: Math.round(x1 / ocr.scaleFactor),
-          top: Math.round(y1 / ocr.scaleFactor),
-          width: Math.max(1, Math.round(logicalWidth)),
-          height: Math.max(1, Math.round(logicalHeight)),
-        },
-        clickX: Math.round(ocr.originX + cx),
-        clickY: Math.round(ocr.originY + cy),
+        source,
+        ...clickTarget,
+        logicalRect: spaces.globalLogical,
+        overlayRect: overlay
+          ? {
+            left: Math.round(overlay.left),
+            top: Math.round(overlay.top),
+            width: Math.max(1, Math.round(overlay.width)),
+            height: Math.max(1, Math.round(overlay.height)),
+          }
+          : null,
       }
-    })
+    }).filter(Boolean)
   }
 
   async function handleTranscript(transcript, options = {}) {

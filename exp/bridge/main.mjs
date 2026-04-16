@@ -74,6 +74,8 @@ const shortcutManager = new GlobalShortcutManager({
   configPath: path.join(runtimeRoot, 'shortcut-config.json'),
   onToggle: ({ triggeredLabel }) => {
     recordingByShortcut = !recordingByShortcut
+    // 终端里直接打印快捷键切换，便于区分“没触发快捷键”和“触发后链路卡住”。
+    console.log(`[shortcut] ${triggeredLabel} -> recording=${recordingByShortcut}`)
     mainWindow?.webContents.send('bridge:recording-toggle', {
       source: 'uiohook',
       recording: recordingByShortcut,
@@ -1370,6 +1372,8 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
 
   const extension = mimeType?.includes('ogg')
     ? 'ogg'
+    : mimeType?.includes('wav')
+      ? 'wav'
     : mimeType?.includes('mp4')
       ? 'm4a'
       : mimeType?.includes('mpeg')
@@ -1378,6 +1382,8 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
 
   const filePath = path.join(tempRoot, `recording-${Date.now()}.${extension}`)
   await fsPromises.writeFile(filePath, Buffer.from(bytes))
+  // 终端诊断：看到这里说明 renderer 已经成功把一段音频封包并通过 IPC 落盘。
+  console.log(`[audio] saved temp recording mime=${mimeType || 'unknown'} bytes=${bytes?.length || 0} path=${filePath}`)
   return filePath
 }
 
@@ -1592,6 +1598,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:voice-handle-audio', async (_event, payload = {}) => {
     // 右 Alt 链路专用：本地 SenseVoice 转写 → 送入语音 FSM；云端 LLM 链路在这条链路里暂时禁用。
+    console.log(`[voice] ASR start file=${payload.filePath || ''} lang=${payload.language || 'auto'} ocr=${normalizeVoiceOcrBackend(payload.ocrBackend)} spatial=${Boolean(payload.spatialMemoryEnabled)}`)
     await ensureManagedSenseVoiceServiceReady()
     // language 由 renderer 设置透传过来（auto / zh / en / ja / ko / yue），
     // 连续听写模式下每一句都复用同一个首选语言。
@@ -1600,10 +1607,13 @@ app.whenReady().then(async () => {
       language: payload.language,
     })
     const transcript = String(asr.text || '').trim()
+    // 终端诊断：看到这里说明本地 SenseVoice 已经真正返回结果。
+    console.log(`[voice] ASR done text="${transcript}" latency=${asr.localLatencyMs ?? '-'}ms converted=${Boolean(asr.convertedToWav)}`)
     const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
       backend: normalizeVoiceOcrBackend(payload.ocrBackend),
       spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
     }) : { handled: false, reason: 'router-missing' }
+    console.log(`[voice] route handled=${Boolean(routed?.handled)} reason=${routed?.reason || ''} phase=${voiceRouter?.getState()?.phase || 'idle'}`)
     return { transcript, asr, routed, state: voiceRouter?.getState() }
   })
 
@@ -1620,6 +1630,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('bridge:voice-reset', async () => {
     voiceRouter?.reset('manual')
     return { ok: true, state: voiceRouter?.getState() }
+  })
+
+  ipcMain.on('bridge:voice-log-renderer', (_event, payload = {}) => {
+    const at = new Date().toISOString()
+    const text = String(payload?.message || '').trim()
+    if (!text) return
+    const message = `[renderer] ${text}`
+    console.log(message)
+    mainWindow?.webContents.send('bridge:voice-log', { message, at })
   })
 
   ipcMain.handle('bridge:transcribe-sensevoice', async (_event, payload = {}) => {
@@ -1680,6 +1699,10 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.on('bridge:overlay-state', (_event, payload) => {
+    // 终端里记录 overlay 状态切换，便于判断 renderer 当前停在 listening / waiting / idle 哪一步。
+    if (payload?.status) {
+      console.log(`[overlay] status=${payload.status} title=${payload.title || ''} subtitle=${payload.subtitle || ''}`)
+    }
     if (payload?.status === 'listening') {
       recordingByShortcut = true
     }

@@ -305,6 +305,13 @@ export function App() {
     setLogs((current) => [`[${time}] ${message}`, ...current].slice(0, 80))
   }
 
+  // 连续听写的大部分状态发生在 renderer，额外转发到主进程终端后更容易做跨进程排查。
+  function forwardVoiceDebugLog(message) {
+    try {
+      window.bridgeApi.voiceLog?.({ message })
+    } catch {}
+  }
+
   function updateSelectedInputDeviceId(nextDeviceId) {
     selectedInputDeviceIdRef.current = nextDeviceId
     setSelectedInputDeviceId(nextDeviceId)
@@ -768,11 +775,15 @@ export function App() {
     try {
       const handle = await startDictationPipeline({
         deviceId,
-        logger: (message) => appendLog(message),
+        logger: (message) => {
+          appendLog(message)
+          forwardVoiceDebugLog(message)
+        },
         onUtterance: (utterance) => { void handleDictationUtterance(utterance) },
         onPhaseChange: ({ to }) => setDictationPhase(to),
         onError: (error) => {
           appendLog(`连续听写出错: ${error.message || error}`)
+          forwardVoiceDebugLog(`连续听写出错: ${error.message || error}`)
         },
       })
       dictationHandleRef.current = handle

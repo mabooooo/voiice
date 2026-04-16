@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   voiceHandleAudio: (payload) => ipcRenderer.invoke('bridge:voice-handle-audio', payload),
   voiceRouteText: (payload) => ipcRenderer.invoke('bridge:voice-route-text', payload),
   voiceReset: () => ipcRenderer.invoke('bridge:voice-reset'),
+  // renderer 侧调试日志转发到主进程终端，方便排查连续听写这类只发生在前端的链路。
+  voiceLog: (payload) => ipcRenderer.send('bridge:voice-log-renderer', payload),
   onVoiceLog: (callback) => {
     const handler = (_event, payload) => callback(payload)
     ipcRenderer.on('bridge:voice-log', handler)

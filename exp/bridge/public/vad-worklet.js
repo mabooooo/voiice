@@ -9,8 +9,13 @@ class VadFrameProcessor extends AudioWorkletProcessor {
     this.writeOffset = 0
   }
 
-  process(inputs) {
+  process(inputs, outputs) {
     const channel = inputs[0]?.[0]
+    const output = outputs[0]?.[0]
+    // 这条链路只借用 WebAudio 的拉流时钟，输出保持静音，避免把麦克风回放出来。
+    if (output) {
+      output.fill(0)
+    }
     if (!channel || channel.length === 0) {
       return true
     }

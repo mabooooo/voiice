@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('bridgeApi', {
   getConfigStatus: () => ipcRenderer.invoke('bridge:get-config-status'),
+  getAppSettings: () => ipcRenderer.invoke('bridge:get-app-settings'),
+  updateAppSettings: (payload) => ipcRenderer.invoke('bridge:update-app-settings', payload),
   pickAudioFile: () => ipcRenderer.invoke('bridge:pick-audio-file'),
   saveRecording: (payload) => ipcRenderer.invoke('bridge:save-recording', payload),
   dictationStartSession: (payload) => ipcRenderer.invoke('bridge:dictation-session-start', payload),

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.0.25 OCR GPU Profile + 设置持久化恢复
+
+### Added
+
+- 新增主进程设置持久化文件 `.runtime/app-settings.json`，由 `main.mjs` 统一管理 `activeMenu / provider / microphoneId / voiceOcrBackend / spatialMemoryEnabled / dictationEnabled / preferredLanguage / senseVoiceEnabled`。
+- preload 新增 `getAppSettings / updateAppSettings` IPC，供 renderer 在启动时回填设置、在用户修改后同步写回主进程。
+- OCR 后端选择新增 `profile` 概念：设置页现在支持 `OmniParser - GPU / OmniParser - CPU / PP-OCR - GPU / PP-OCR - CPU` 四档固定选项。
+
+### Changed
+
+- `main.mjs` 新增 `VOICE_OCR_PROFILE_TABLE`，把 OCR 选择统一从“后端名”升级为“后端 + device”组合配置，连续听写、语音路由、开发者测试与设置页按钮共用同一份解析逻辑。
+- 主进程托管的 `PP-OCR` 与 `OmniParser` 服务现在会记录 `profile / device` 状态；同一后端在 `CPU / GPU` 间切换时，会先回收旧进程，再按新 device 拉起，避免沿用旧服务。
+- 设置页的 OCR 下拉框改为四个明确选项，并展示主进程当前 `profile` 以及 `PP-OCR / OmniParser` 的实际托管状态与 device。
+- renderer 启动时改为先从主进程读取落盘设置，再允许后续设置写回磁盘，避免页面初始默认值抢先覆盖已有配置。
+
+### Fixed
+
+- 修复应用重启后设置页记录偶发被重置的问题：不再只依赖 Chromium `localStorage`，即使浏览器侧本地存储异常，设置仍可从主进程 JSON 恢复。
+- 修复 OCR 切到 GPU 后，应用内部不同入口可能仍沿用旧 device 进程的问题；现在切换 `profile` 后，托管服务会按目标 device 重新启动。
+- 修复 `PP-OCR` 在应用内看似“已切 GPU、但速度接近 CPU”时难以定位的问题；现在设置页与运行时状态会显式展示当前 `device`，便于确认是否真的走到 `gpu`。
+
 ## 0.0.24 坐标换算封装 + 点击定位收口
 
 ### Added

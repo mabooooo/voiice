@@ -277,27 +277,47 @@ export function App() {
   const meterLastPushRef = useRef(0)
   const localAsrTestRecorderRef = useRef(null)
   const localAsrTestMediaStreamRef = useRef(null)
+  const settingsHydratedRef = useRef(false)
 
   const canExecutePlan = plan.length > 0
   const renderedPlan = useMemo(() => formatJson(plan), [plan])
 
-  useEffect(() => { localStorage.setItem(STORAGE_KEYS.activeMenu, activeMenu) }, [activeMenu])
-  useEffect(() => { localStorage.setItem(STORAGE_KEYS.provider, selectedProvider) }, [selectedProvider])
-  useEffect(() => { localStorage.setItem(STORAGE_KEYS.senseVoiceEnabled, String(senseVoiceEnabled)) }, [senseVoiceEnabled])
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.activeMenu, activeMenu)
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ activeMenu }).catch(() => {})
+  }, [activeMenu])
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.provider, selectedProvider)
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ provider: selectedProvider }).catch(() => {})
+  }, [selectedProvider])
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.senseVoiceEnabled, String(senseVoiceEnabled))
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ senseVoiceEnabled }).catch(() => {})
+  }, [senseVoiceEnabled])
   // 语音点选 OCR 后端单独持久化，便于在快速链路和兼容链路之间切换。
   useEffect(() => {
     voiceOcrBackendRef.current = voiceOcrBackend
     localStorage.setItem(STORAGE_KEYS.voiceOcrBackend, voiceOcrBackend)
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ voiceOcrBackend }).catch(() => {})
   }, [voiceOcrBackend])
   // 空间记忆只作用于本地点选链路，单独持久化避免影响其他分析入口。
   useEffect(() => {
     spatialMemoryEnabledRef.current = spatialMemoryEnabled
     localStorage.setItem(STORAGE_KEYS.spatialMemoryEnabled, String(spatialMemoryEnabled))
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ spatialMemoryEnabled }).catch(() => {})
   }, [spatialMemoryEnabled])
   // 听写开关改变时：关闭立刻停掉当前会话，开启时仅写入偏好，真正的启动发生在快捷键触发。
   useEffect(() => {
     dictationEnabledRef.current = dictationEnabled
     localStorage.setItem(STORAGE_KEYS.dictationEnabled, String(dictationEnabled))
+    if (settingsHydratedRef.current) {
+      void window.bridgeApi.updateAppSettings({ dictationEnabled }).catch(() => {})
+    }
     if (!dictationEnabled && dictationActiveRef.current) {
       void stopDictationMode('setting-off')
     }
@@ -305,10 +325,14 @@ export function App() {
   useEffect(() => {
     preferredLanguageRef.current = preferredLanguage
     localStorage.setItem(STORAGE_KEYS.preferredLanguage, preferredLanguage)
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ preferredLanguage }).catch(() => {})
   }, [preferredLanguage])
   useEffect(() => {
     selectedInputDeviceIdRef.current = selectedInputDeviceId
     localStorage.setItem(STORAGE_KEYS.microphoneId, selectedInputDeviceId)
+    if (!settingsHydratedRef.current) return
+    void window.bridgeApi.updateAppSettings({ microphoneId: selectedInputDeviceId }).catch(() => {})
   }, [selectedInputDeviceId])
   useEffect(() => { availableMicrophonesRef.current = availableMicrophones }, [availableMicrophones])
   useEffect(() => { recorderRef.current = recorder }, [recorder])
@@ -400,9 +424,6 @@ export function App() {
     const status = await window.bridgeApi.getConfigStatus()
     setRuntimeConfig(status)
     setConfigStatus(formatJson(status))
-    if (!localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)) {
-      setVoiceOcrBackend(normalizeVoiceOcrSelection(status.voiceOcr?.profile))
-    }
     if (status.shortcut) {
       setShortcutState(status.shortcut)
       if (status.shortcut.shortcut) setShortcutDraft(status.shortcut.shortcut)
@@ -434,7 +455,19 @@ export function App() {
   }
 
   useEffect(() => {
-    refreshRuntimeConfig().catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
+    window.bridgeApi.getAppSettings().then((settings) => {
+      // 启动时先用主进程落盘的设置回填，再允许后续变更写回磁盘。
+      setActiveMenu(settings.activeMenu || ACTIVE_MENU.developer)
+      setSelectedProvider(settings.provider || 'qwen')
+      setSenseVoiceEnabled(Boolean(settings.senseVoiceEnabled))
+      setVoiceOcrBackend(normalizeVoiceOcrSelection(settings.voiceOcrBackend))
+      setSpatialMemoryEnabled(settings.spatialMemoryEnabled !== false)
+      setDictationEnabled(Boolean(settings.dictationEnabled))
+      setPreferredLanguage(settings.preferredLanguage || 'auto')
+      updateSelectedInputDeviceId(settings.microphoneId || '')
+      settingsHydratedRef.current = true
+      return refreshRuntimeConfig()
+    }).catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
 
     window.bridgeApi.getShortcutState().then((state) => {
       setShortcutState(state)

@@ -38,6 +38,7 @@ const runtimeSessionData = path.join(runtimeRoot, 'session-data')
 const runtimeLogs = path.join(runtimeRoot, 'logs')
 const runtimeScreenshots = path.join(runtimeRoot, 'desktop-captures')
 const runtimeSpatialMemoryPath = path.join(runtimeRoot, 'app-spatial-memory.json')
+const runtimeAppSettingsPath = path.join(runtimeRoot, 'app-settings.json')
 
 for (const target of [runtimeRoot, runtimeUserData, runtimeSessionData, runtimeLogs, runtimeScreenshots]) {
   fs.mkdirSync(target, { recursive: true })
@@ -181,6 +182,16 @@ const VOICE_OCR_PROFILE_TABLE = {
 }
 const VOICE_OCR_PROFILE_SET = new Set(Object.keys(VOICE_OCR_PROFILE_TABLE))
 const SPATIAL_MEMORY_SEARCH_PADDING = 80
+const DEFAULT_APP_SETTINGS = {
+  activeMenu: 'developer',
+  microphoneId: '',
+  provider: 'qwen',
+  senseVoiceEnabled: false,
+  voiceOcrBackend: DEFAULT_VOICE_OCR_PROFILE,
+  spatialMemoryEnabled: true,
+  dictationEnabled: false,
+  preferredLanguage: 'auto',
+}
 
 function buildTimestampToken(date = new Date()) {
   const pad = value => String(value).padStart(2, '0')
@@ -214,6 +225,40 @@ function normalizeVoiceOcrBackend(value) {
 }
 
 let currentVoiceOcrProfile = normalizeVoiceOcrProfile(process.env.VOICE_OCR_PROFILE || process.env.VOICE_OCR_BACKEND)
+
+function normalizeAppSettings(input = {}) {
+  // 设置持久化统一落到主进程 JSON，避免单纯依赖 Chromium Local Storage 被意外清空。
+  return {
+    activeMenu: String(input.activeMenu || DEFAULT_APP_SETTINGS.activeMenu),
+    microphoneId: String(input.microphoneId || DEFAULT_APP_SETTINGS.microphoneId),
+    provider: normalizeProvider(input.provider || DEFAULT_APP_SETTINGS.provider),
+    senseVoiceEnabled: Boolean(input.senseVoiceEnabled),
+    voiceOcrBackend: normalizeVoiceOcrProfile(input.voiceOcrBackend || DEFAULT_APP_SETTINGS.voiceOcrBackend),
+    spatialMemoryEnabled: input.spatialMemoryEnabled !== false,
+    dictationEnabled: Boolean(input.dictationEnabled),
+    preferredLanguage: String(input.preferredLanguage || DEFAULT_APP_SETTINGS.preferredLanguage),
+  }
+}
+
+async function loadAppSettings() {
+  try {
+    const text = await fsPromises.readFile(runtimeAppSettingsPath, 'utf8')
+    const parsed = JSON.parse(text)
+    const normalized = normalizeAppSettings(parsed)
+    currentVoiceOcrProfile = normalized.voiceOcrBackend
+    return normalized
+  } catch {
+    return { ...DEFAULT_APP_SETTINGS }
+  }
+}
+
+async function saveAppSettings(partial = {}) {
+  const current = await loadAppSettings()
+  const next = normalizeAppSettings({ ...current, ...partial })
+  await fsPromises.writeFile(runtimeAppSettingsPath, JSON.stringify(next, null, 2), 'utf8')
+  currentVoiceOcrProfile = next.voiceOcrBackend
+  return next
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
@@ -1931,6 +1976,7 @@ async function stopDictationSession(reason = 'manual') {
 
 app.whenReady().then(async () => {
   await spatialMemoryStore.load()
+  await loadAppSettings()
   startManagedSenseVoiceService().catch((error) => {
     managedSenseVoiceState = {
       ...managedSenseVoiceState,
@@ -1988,6 +2034,7 @@ app.whenReady().then(async () => {
   await shortcutManager.start()
 
   ipcMain.handle('bridge:get-config-status', async () => {
+    const appSettings = await loadAppSettings()
     return {
       hasDashscopeApiKey: Boolean(process.env.DASHSCOPE_API_KEY),
       baseUrl: process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -2002,11 +2049,12 @@ app.whenReady().then(async () => {
         managed: managedPPOcrState,
       },
       voiceOcr: {
-        profile: currentVoiceOcrProfile,
-        backend: normalizeVoiceOcrBackend(currentVoiceOcrProfile),
+        profile: appSettings.voiceOcrBackend,
+        backend: normalizeVoiceOcrBackend(appSettings.voiceOcrBackend),
         supported: Object.keys(VOICE_OCR_PROFILE_TABLE),
         options: Object.values(VOICE_OCR_PROFILE_TABLE),
       },
+      settings: appSettings,
       sensevoice: {
         baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
         managed: managedSenseVoiceState,
@@ -2021,6 +2069,14 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:get-shortcut-state', async () => {
     return shortcutManager.getState()
+  })
+
+  ipcMain.handle('bridge:get-app-settings', async () => {
+    return loadAppSettings()
+  })
+
+  ipcMain.handle('bridge:update-app-settings', async (_event, payload = {}) => {
+    return saveAppSettings(payload)
   })
 
   ipcMain.handle('bridge:update-shortcut', async (_event, payload) => {

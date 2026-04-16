@@ -6,17 +6,19 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
-import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, screen } from 'electron'
 
+import { AppSpatialMemoryStore } from './src/appSpatialMemoryStore.mjs'
 import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
 import { probePPOcr, testPPOcrWithImage } from './src/ppOcrClient.mjs'
+import { runPowerShell } from './src/powershell.mjs'
 import { testRapidOcrWithImage } from './src/rapidOcrClient.mjs'
 import { listProviderStatuses, normalizeProvider } from './src/providerConfig.mjs'
 import { probeSenseVoice, transcribeSenseVoiceAudio } from './src/senseVoiceClient.mjs'
 import { GlobalShortcutManager } from './src/shortcutManager.mjs'
-import { createVoiceActionRouter } from './src/voiceActionRouter.mjs'
+import { createVoiceActionRouter, pickCandidates } from './src/voiceActionRouter.mjs'
 import { WindowRegistry } from './src/windowRegistry.mjs'
 import { executeActionPlan } from './src/windowsController.mjs'
 
@@ -27,6 +29,7 @@ const runtimeUserData = path.join(runtimeRoot, 'user-data')
 const runtimeSessionData = path.join(runtimeRoot, 'session-data')
 const runtimeLogs = path.join(runtimeRoot, 'logs')
 const runtimeScreenshots = path.join(runtimeRoot, 'desktop-captures')
+const runtimeSpatialMemoryPath = path.join(runtimeRoot, 'app-spatial-memory.json')
 
 for (const target of [runtimeRoot, runtimeUserData, runtimeSessionData, runtimeLogs, runtimeScreenshots]) {
   fs.mkdirSync(target, { recursive: true })
@@ -64,6 +67,9 @@ let managedPPOcrState = {
   warmed: false,
 }
 let voiceRouter = null
+const spatialMemoryStore = new AppSpatialMemoryStore({
+  filePath: runtimeSpatialMemoryPath,
+})
 const shortcutManager = new GlobalShortcutManager({
   configPath: path.join(runtimeRoot, 'shortcut-config.json'),
   onToggle: ({ triggeredLabel }) => {
@@ -103,6 +109,7 @@ const PPOCR_SERVER_PATH = path.join(PPOCR_CAPABILITY_ROOT, 'service', 'server.py
 // 1x1 透明像素 PNG，用于 PP-OCR 首次调用预热 lru_cache 里的模型。
 const WARMUP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
 const VOICE_OCR_BACKENDS = new Set(['ppocr', 'rapidocr'])
+const SPATIAL_MEMORY_SEARCH_PADDING = 80
 
 function buildTimestampToken(date = new Date()) {
   const pad = value => String(value).padStart(2, '0')
@@ -120,6 +127,321 @@ function buildTimestampToken(date = new Date()) {
 function normalizeVoiceOcrBackend(value) {
   const normalized = String(value || '').trim().toLowerCase()
   return VOICE_OCR_BACKENDS.has(normalized) ? normalized : 'ppocr'
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function buildTimestampedPath(sourcePath, suffix, extension = 'png') {
+  const parsedPath = path.parse(sourcePath)
+  return path.join(parsedPath.dir, `${parsedPath.name}-${suffix}-${buildTimestampToken()}.${extension}`)
+}
+
+function isPointInBounds(x, y, bounds) {
+  return Number.isFinite(x)
+    && Number.isFinite(y)
+    && bounds
+    && x >= bounds.x
+    && y >= bounds.y
+    && x <= bounds.x + bounds.width
+    && y <= bounds.y + bounds.height
+}
+
+// 点击点可能同时落在多个窗口区域里，优先选当前焦点窗口，再选面积更小的候选。
+function findBestWindowForPoint(snapshot, x, y) {
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : []
+  const focusedWindow = snapshot?.focusedWindow || null
+  if (focusedWindow && isPointInBounds(x, y, focusedWindow.bounds)) {
+    return focusedWindow
+  }
+
+  const hits = items.filter(item => isPointInBounds(x, y, item.bounds))
+  hits.sort((left, right) => {
+    const leftArea = (left.bounds?.width || 0) * (left.bounds?.height || 0)
+    const rightArea = (right.bounds?.width || 0) * (right.bounds?.height || 0)
+    return leftArea - rightArea
+  })
+  return hits[0] || null
+}
+
+function buildScreenRectFromCandidate(target) {
+  const bbox = Array.isArray(target?.bbox) ? target.bbox : []
+  if (bbox.length < 4 || !Number.isFinite(target?.clickX) || !Number.isFinite(target?.clickY)) {
+    return null
+  }
+
+  const [x1, y1, x2, y2] = bbox
+  const width = Math.max(1, x2 - x1)
+  const height = Math.max(1, y2 - y1)
+  const left = Math.round(target.clickX - width / 2)
+  const top = Math.round(target.clickY - height / 2)
+  return { left, top, width, height }
+}
+
+function buildRelativeRectFromLogicalRect(logicalRect, windowBounds) {
+  if (!logicalRect || !windowBounds?.width || !windowBounds?.height) {
+    return null
+  }
+
+  return {
+    x: clamp((logicalRect.left - windowBounds.x) / windowBounds.width, 0, 1),
+    y: clamp((logicalRect.top - windowBounds.y) / windowBounds.height, 0, 1),
+    width: clamp(logicalRect.width / windowBounds.width, 0, 1),
+    height: clamp(logicalRect.height / windowBounds.height, 0, 1),
+  }
+}
+
+async function runVoiceOcrWithImage(imagePath, backend, options = {}) {
+  const normalizedBackend = normalizeVoiceOcrBackend(backend)
+  const ocrStartAt = Date.now()
+
+  if (normalizedBackend === 'rapidocr') {
+    const result = await testRapidOcrWithImage(imagePath, options)
+    console.log(`[${new Date().toISOString()}] [voice] rapidocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0}`)
+    return result
+  }
+
+  await ensureManagedPPOcrServiceReady()
+  const result = await testPPOcrWithImage(imagePath, options)
+  console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0}`)
+  return result
+}
+
+// 直接用 Electron 原生图片裁剪局部区域，避免额外引入图像处理依赖。
+async function cropImageToFile(sourcePath, cropRect, outputPath) {
+  const image = nativeImage.createFromPath(sourcePath)
+  if (image.isEmpty()) {
+    throw new Error(`无法读取截图文件: ${sourcePath}`)
+  }
+
+  const size = image.getSize()
+  const x = clamp(Math.round(cropRect.x || 0), 0, Math.max(0, size.width - 1))
+  const y = clamp(Math.round(cropRect.y || 0), 0, Math.max(0, size.height - 1))
+  const width = clamp(Math.round(cropRect.width || 0), 1, Math.max(1, size.width - x))
+  const height = clamp(Math.round(cropRect.height || 0), 1, Math.max(1, size.height - y))
+  const cropped = image.crop({ x, y, width, height })
+  await fsPromises.writeFile(outputPath, cropped.toPNG())
+  return { x, y, width, height, imageWidth: size.width, imageHeight: size.height, outputPath }
+}
+
+function buildSearchRectFromMemory(memoryEntry, windowItem) {
+  const bounds = windowItem?.bounds
+  const relativeRect = memoryEntry?.relativeRect
+  if (!bounds || !relativeRect) return null
+
+  const currentRect = {
+    x: relativeRect.x * bounds.width,
+    y: relativeRect.y * bounds.height,
+    width: Math.max(24, relativeRect.width * bounds.width),
+    height: Math.max(24, relativeRect.height * bounds.height),
+  }
+
+  const paddingX = Math.max(SPATIAL_MEMORY_SEARCH_PADDING, currentRect.width * 0.9)
+  const paddingY = Math.max(SPATIAL_MEMORY_SEARCH_PADDING, currentRect.height * 0.9)
+
+  return {
+    x: clamp(currentRect.x - paddingX, 0, Math.max(0, bounds.width - 1)),
+    y: clamp(currentRect.y - paddingY, 0, Math.max(0, bounds.height - 1)),
+    width: clamp(currentRect.width + paddingX * 2, 1, bounds.width),
+    height: clamp(currentRect.height + paddingY * 2, 1, bounds.height),
+  }
+}
+
+async function clickWindowLocalPoint(handle, localX, localY) {
+  const safeHandle = String(handle || '').replace(/'/g, '')
+  const offsetX = Math.round(Number(localX) || 0)
+  const offsetY = Math.round(Number(localY) || 0)
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public struct RECT {
+  public int Left;
+  public int Top;
+  public int Right;
+  public int Bottom;
+}
+public static class BridgeWindowClick {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+}
+"@
+$hWnd = [IntPtr][Int64]'${safeHandle}'
+if ($hWnd -eq [IntPtr]::Zero) { throw "Invalid window handle" }
+[BridgeWindowClick]::SetProcessDPIAware() | Out-Null
+$rect = New-Object RECT
+if (-not [BridgeWindowClick]::GetWindowRect($hWnd, [ref]$rect)) { throw "GetWindowRect failed" }
+$clickX = [int]($rect.Left + ${offsetX})
+$clickY = [int]($rect.Top + ${offsetY})
+[BridgeWindowClick]::SetCursorPos($clickX, $clickY) | Out-Null
+Start-Sleep -Milliseconds 40
+[BridgeWindowClick]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+[BridgeWindowClick]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+[PSCustomObject]@{
+  ok = $true
+  handle = '${safeHandle}'
+  clickX = $clickX
+  clickY = $clickY
+  localX = ${offsetX}
+  localY = ${offsetY}
+} | ConvertTo-Json -Depth 3
+`
+
+  const result = await runPowerShell(script)
+  return result.stdout ? JSON.parse(result.stdout) : { ok: true }
+}
+
+async function tryResolveCandidateFromSpatialMemory({ keyword, backend, logger }) {
+  const snapshot = await windowRegistry.refreshSnapshot()
+  const focusedWindow = snapshot.focusedWindow
+  if (!focusedWindow) {
+    logger?.(`[voice] spatial-memory miss: no focused window`)
+    return null
+  }
+
+  const memoryEntry = spatialMemoryStore.getMemory(focusedWindow, keyword)
+  if (!memoryEntry) {
+    logger?.(`[voice] spatial-memory miss: no key for ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title}`)
+    return null
+  }
+
+  const searchRect = buildSearchRectFromMemory(memoryEntry, focusedWindow)
+  if (!searchRect) {
+    logger?.('[voice] spatial-memory miss: invalid remembered rect')
+    return null
+  }
+
+  const capturedWindow = await captureWindowImage(focusedWindow.handle)
+  const cropOutputPath = buildTimestampedPath(capturedWindow.imagePath, 'memory-crop')
+  const scaleX = capturedWindow.width / Math.max(1, focusedWindow.bounds.width)
+  const scaleY = capturedWindow.height / Math.max(1, focusedWindow.bounds.height)
+  // 记忆里保存的是“相对窗口位置”，这里先换算到当前窗口尺寸，再截一个更小的搜索区域。
+  const cropRect = await cropImageToFile(capturedWindow.imagePath, {
+    x: searchRect.x * scaleX,
+    y: searchRect.y * scaleY,
+    width: searchRect.width * scaleX,
+    height: searchRect.height * scaleY,
+  }, cropOutputPath)
+
+  const parseResult = await runVoiceOcrWithImage(cropRect.outputPath, backend, { timeoutMs: 60000 })
+  const picks = pickCandidates(parseResult.ocrLines, keyword, 3)
+  if (picks.length === 0) {
+    logger?.(`[voice] spatial-memory miss: crop OCR no candidate for "${keyword}"`)
+    return null
+  }
+
+  const target = picks[0]
+  const [x1, y1, x2, y2] = target.bbox
+  const localCx = (x1 + x2) / 2
+  const localCy = (y1 + y2) / 2
+  // 小区域 OCR 返回的是 crop 内局部坐标，这里再映射回窗口全局坐标用于真实点击。
+  const windowX = searchRect.x + (cropRect.x / scaleX - searchRect.x) + (localCx / scaleX)
+  const windowY = searchRect.y + (cropRect.y / scaleY - searchRect.y) + (localCy / scaleY)
+  const logicalClickX = focusedWindow.bounds.x + windowX
+  const logicalClickY = focusedWindow.bounds.y + windowY
+  const clickX = Math.round(logicalClickX)
+  const clickY = Math.round(logicalClickY)
+
+  logger?.(`[voice] spatial-memory hit: ${focusedWindow.appName || 'unknown'} / ${focusedWindow.title} -> logical=(${clickX},${clickY})`)
+  return {
+    index: 1,
+    text: target.text,
+    bbox: [
+      Math.round(focusedWindow.bounds.x + windowX - ((x2 - x1) / scaleX) / 2),
+      Math.round(focusedWindow.bounds.y + windowY - ((y2 - y1) / scaleY) / 2),
+      Math.round(focusedWindow.bounds.x + windowX + ((x2 - x1) / scaleX) / 2),
+      Math.round(focusedWindow.bounds.y + windowY + ((y2 - y1) / scaleY) / 2),
+    ],
+    clickX,
+    clickY,
+    windowHandle: focusedWindow.handle,
+    localClickX: Math.round(windowX),
+    localClickY: Math.round(windowY),
+    source: 'spatial-memory',
+    window: focusedWindow,
+    logicalRect: {
+      left: focusedWindow.bounds.x + searchRect.x + (x1 / scaleX),
+      top: focusedWindow.bounds.y + searchRect.y + (y1 / scaleY),
+      width: Math.max(1, (x2 - x1) / scaleX),
+      height: Math.max(1, (y2 - y1) / scaleY),
+    },
+  }
+}
+
+async function rememberSpatialSelection({ keyword, target, backend, mode, logger }) {
+  if (!keyword || !target) return null
+
+  await new Promise(resolve => setTimeout(resolve, 180))
+  const snapshot = await windowRegistry.refreshSnapshot()
+  // 点击完成后重新读取前台窗口，再把按钮位置折算成“相对窗口坐标”保存。
+  const hostWindow = findBestWindowForPoint(
+    snapshot,
+    target.clickX,
+    target.clickY,
+  )
+  if (!hostWindow?.bounds?.width || !hostWindow?.bounds?.height) {
+    logger?.('[voice] spatial-memory skip: host window not found')
+    return null
+  }
+
+  let relativeRect = null
+
+  try {
+    // 点击后用“当前窗口截图 + 同关键词 OCR”重新定位，避免整屏坐标和窗口坐标混算。
+    const capturedWindow = await captureWindowImage(hostWindow.handle)
+    const windowOcr = await runVoiceOcrWithImage(capturedWindow.imagePath, backend, { timeoutMs: 60000 })
+    const windowPicks = pickCandidates(windowOcr.ocrLines, keyword, 3)
+    if (windowPicks.length > 0) {
+      const [x1, y1, x2, y2] = windowPicks[0].bbox
+      relativeRect = {
+        x: clamp(x1 / Math.max(1, capturedWindow.width), 0, 1),
+        y: clamp(y1 / Math.max(1, capturedWindow.height), 0, 1),
+        width: clamp((x2 - x1) / Math.max(1, capturedWindow.width), 0, 1),
+        height: clamp((y2 - y1) / Math.max(1, capturedWindow.height), 0, 1),
+      }
+      logger?.('[voice] spatial-memory save source: window-ocr')
+    }
+  } catch (error) {
+    logger?.(`[voice] spatial-memory window-ocr failed: ${error.message || error}`)
+  }
+
+  if (!relativeRect) {
+    // 窗口内 OCR 失败时，再回退到之前的逻辑坐标换算。
+    const logicalRect = target.logicalRect || null
+    relativeRect = buildRelativeRectFromLogicalRect(logicalRect, hostWindow.bounds)
+    if (relativeRect) {
+      logger?.('[voice] spatial-memory save source: logical-rect fallback')
+    }
+  }
+
+  if (!relativeRect) {
+    const screenRect = buildScreenRectFromCandidate(target)
+    if (!screenRect) {
+      logger?.('[voice] spatial-memory skip: candidate rect unavailable')
+      return null
+    }
+    logger?.('[voice] spatial-memory save source: screen-rect fallback')
+    relativeRect = {
+      x: clamp((screenRect.left - hostWindow.bounds.x) / hostWindow.bounds.width, 0, 1),
+      y: clamp((screenRect.top - hostWindow.bounds.y) / hostWindow.bounds.height, 0, 1),
+      width: clamp(screenRect.width / hostWindow.bounds.width, 0, 1),
+      height: clamp(screenRect.height / hostWindow.bounds.height, 0, 1),
+    }
+  }
+
+  const remembered = await spatialMemoryStore.rememberSelection({
+    window: hostWindow,
+    keyword,
+    labelText: target.text,
+    backend,
+    mode,
+    relativeRect,
+  })
+  logger?.(`[voice] spatial-memory saved: ${hostWindow.appName || 'unknown'} / ${hostWindow.title} / ${keyword} -> x=${relativeRect.x.toFixed(3)} y=${relativeRect.y.toFixed(3)} w=${relativeRect.width.toFixed(3)} h=${relativeRect.height.toFixed(3)}`)
+  return remembered
 }
 
 function disposeIndicatorWindows() {
@@ -929,16 +1251,7 @@ async function captureAndOcrPrimaryDisplay(options = {}) {
   const scaleFactor = item.width / Math.max(1, logicalWidth)
   const origin = display.nativeOrigin || display.bounds
 
-  let parseResult
-  const ocrStartAt = Date.now()
-  if (backend === 'rapidocr') {
-    parseResult = await testRapidOcrWithImage(item.savedPath, options)
-    console.log(`[${new Date().toISOString()}] [voice] rapidocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
-  } else {
-    await ensureManagedPPOcrServiceReady()
-    parseResult = await testPPOcrWithImage(item.savedPath, options)
-    console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${parseResult.lineCount || 0}`)
-  }
+  const parseResult = await runVoiceOcrWithImage(item.savedPath, backend, options)
 
   return {
     ocrLines: parseResult.ocrLines || [],
@@ -947,6 +1260,7 @@ async function captureAndOcrPrimaryDisplay(options = {}) {
     imageWidth: item.width,
     imageHeight: item.height,
     displayId: display.id,
+    displayBounds: display.bounds,
     scaleFactor,
     originX: Math.round(origin.x),
     originY: Math.round(origin.y),
@@ -1068,6 +1382,7 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
 }
 
 app.whenReady().then(async () => {
+  await spatialMemoryStore.load()
   startManagedSenseVoiceService().catch((error) => {
     managedSenseVoiceState = {
       ...managedSenseVoiceState,
@@ -1080,9 +1395,29 @@ app.whenReady().then(async () => {
   })
   voiceRouter = createVoiceActionRouter({
     captureAndOcr: captureAndOcrPrimaryDisplay,
+    resolveSpatialMemoryCandidate: async ({ keyword, backend }) => tryResolveCandidateFromSpatialMemory({
+      keyword,
+      backend,
+      logger: (msg) => {
+        const at = new Date().toISOString()
+        const message = `[${at}] ${msg}`
+        console.log(message)
+        mainWindow?.webContents.send('bridge:voice-log', { message, at })
+      },
+    }),
+    rememberSpatialSelection: async (payload) => rememberSpatialSelection({
+      ...payload,
+      logger: (msg) => {
+        const at = new Date().toISOString()
+        const message = `[${at}] ${msg}`
+        console.log(message)
+        mainWindow?.webContents.send('bridge:voice-log', { message, at })
+      },
+    }),
     highlightCandidates: renderCandidateHighlights,
     clearIndicators: clearIndicatorWindows,
     clickAt: async (x, y) => executeActionPlan([{ action: 'click_at', args: { x, y } }]),
+    clickWindowPoint: async (handle, localX, localY) => clickWindowLocalPoint(handle, localX, localY),
     logger: (msg) => {
       const at = new Date().toISOString()
       const message = `[${at}] ${msg}`
@@ -1125,6 +1460,9 @@ app.whenReady().then(async () => {
       sensevoice: {
         baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
         managed: managedSenseVoiceState,
+      },
+      spatialMemory: {
+        ...spatialMemoryStore.buildStats(),
       },
       platform: process.platform,
       shortcut: shortcutManager.getState(),
@@ -1259,6 +1597,7 @@ app.whenReady().then(async () => {
     const transcript = String(asr.text || '').trim()
     const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
       backend: normalizeVoiceOcrBackend(payload.ocrBackend),
+      spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
     }) : { handled: false, reason: 'router-missing' }
     return { transcript, asr, routed, state: voiceRouter?.getState() }
   })
@@ -1268,6 +1607,7 @@ app.whenReady().then(async () => {
     const transcript = String(payload?.transcript || '').trim()
     const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
       backend: normalizeVoiceOcrBackend(payload.ocrBackend),
+      spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
     }) : { handled: false, reason: 'router-missing' }
     return { transcript, routed, state: voiceRouter?.getState() }
   })

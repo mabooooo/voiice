@@ -14,7 +14,7 @@
 - 在开发者模式里执行多屏桌面截图，并可额外生成 `640P` 压缩截图落盘
 - 开发者模式窗口列表支持对指定窗口做本地边框高亮，默认 `3s` 后自动消失
 - 开发者模式窗口详情页支持单独截图当前窗口，并保存到本地截图目录
-- 支持基于 `SenseVoice + OCR` 的本地点选式语音路由：可在 `PP-OCR` 与 `RapidOCR` 之间切换，先说“点击 xxx”，再说“第 N 个”
+- 支持基于 `SenseVoice + OCR` 的本地点选式语音路由：可在 `PP-OCR` 与 `RapidOCR` 之间切换，并可选开启“空间记忆”来加速同窗口重复点击
 
 ## 安全边界
 
@@ -166,11 +166,45 @@ npm run capability:ppocr:start
 - 候选筛选来自 OCR 行，按完整命中和短文本命中加权，最多保留 `9` 个
 - 候选框会围绕原 OCR 框居中外扩 `20px` padding，编号默认显示在右侧，若超出屏幕右边缘则切到左侧
 - 设置页提供“语音点选 OCR 后端”开关：关闭时走原有 `PP-OCR`，打开时走 `.runtime/rapidocr_test.py` 验证过的 `RapidOCR detect + recognize` 链路
+- 设置页提供“空间记忆”开关，默认开启；命中记忆时会优先走“当前窗口小区域 OCR”，失败后自动回退到整屏 OCR
+
+## 空间记忆模块
+
+当前项目内置了一个轻量的“应用 -> 窗口 -> 空间记忆”模块，用于提升重复点击同一窗口控件时的速度与稳定性。
+
+存储结构：
+
+- 应用层：记录 `appName / processPath / naming / habits`
+- 窗口层：按“应用 + 归一化窗口标题”划分窗口 profile
+- 记忆层：按关键词保存 `labelText / relativeRect / lastBackend / lastMode / hitCount / updatedAt`
+
+当前实现文件：
+
+- [src/appSpatialMemoryStore.mjs](D:/Projects/AI/voiice/exp/bridge/src/appSpatialMemoryStore.mjs)
+
+本地落盘位置：
+
+- `exp/bridge/.runtime/app-spatial-memory.json`
+
+工作流程：
+
+1. 第一次说“点击设置”时，仍然走整屏 OCR 或普通多候选确认链路
+2. 点击成功后，会识别当前前台窗口，并重新截图该窗口
+3. 再在窗口截图内部用同一关键词做一次 OCR，得到按钮相对窗口的位置与大小
+4. 以后再次说同一关键词时，若当前前台窗口存在这条记忆，则先截该窗口的小区域做 OCR
+5. 小区域命中后，直接按“窗口句柄 + 窗口内局部坐标”点击；如果小区域没命中，则自动回退整屏 OCR
+
+当前约束：
+
+- 记忆匹配以“应用 + 窗口标题 + 关键词”为主，不做跨窗口泛化
+- 适合布局稳定、标题稳定的页面
+- 当窗口标题、布局或控件位置明显变化时，会自动回退，不强行使用旧记忆
+- 当前命中后不会再次刷新同一条记忆，避免重复抖动
 
 调试方式：
 
 - 有麦链路：按右 `Alt` 录“点击开发者模式” -> 若单候选则直接点击；若多候选则候选框出现 -> 再说“第三个”
-- 无麦链路：在渲染进程 console 执行 `bridgeApi.voiceRouteText({ transcript: '点击开发者模式', ocrBackend: 'rapidocr' })`
+- 无麦链路：在渲染进程 console 执行 `bridgeApi.voiceRouteText({ transcript: '点击开发者模式', ocrBackend: 'rapidocr', spatialMemoryEnabled: true })`
 - 状态重置：可调用 `bridgeApi.voiceReset()`
 
 ## 本地部署 SenseVoice Small
@@ -217,7 +251,9 @@ npm run start
 - 手动文件分析和界面按钮触发的分析链路仍保持原有云端解析方式
 - 候选框 Overlay 使用逻辑像素；截图与点击落点使用物理像素，并通过 `display.nativeOrigin` 适配多显示器拼接
 - Execution Log 当前主要用于查看关键语音链路状态；终端会保留 `capture completed` 与当前 OCR 后端的完成日志，例如 `ppocr completed / rapidocr completed`，便于排查 OCR 慢点
+- 空间记忆命中时，终端会继续输出 `spatial-memory hit / miss / save source / saved` 等日志，便于排查小区域 OCR 是否命中、记忆是否写入，以及最终是否回退到整屏 OCR
 - 桌面截图默认保存到 `exp/bridge/.runtime/desktop-captures`
+- 空间记忆文件默认保存到 `exp/bridge/.runtime/app-spatial-memory.json`
 - OmniParser 本地部署产物默认保存到 `exp/bridge/capabilities/omniparser/.local`
 - PP-OCR 本地部署产物默认保存到 `exp/bridge/capabilities/ppocr/.local`
 - SenseVoice 本地部署产物默认保存到 `exp/bridge/capabilities/sensevoice/.local`

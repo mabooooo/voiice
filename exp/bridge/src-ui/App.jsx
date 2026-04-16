@@ -19,6 +19,7 @@ const STORAGE_KEYS = {
   provider: 'voice-bridge-provider',
   senseVoiceEnabled: 'voice-bridge-sensevoice-enabled',
   voiceOcrBackend: 'voice-bridge-voice-ocr-backend',
+  spatialMemoryEnabled: 'voice-bridge-spatial-memory-enabled',
 }
 const PROVIDER_OPTIONS = [
   { value: 'qwen', label: 'Qwen' },
@@ -174,6 +175,7 @@ export function App() {
   const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(STORAGE_KEYS.provider) || 'qwen')
   const [senseVoiceEnabled, setSenseVoiceEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.senseVoiceEnabled) === 'true')
   const [voiceOcrBackend, setVoiceOcrBackend] = useState(() => localStorage.getItem(STORAGE_KEYS.voiceOcrBackend) || 'ppocr')
+  const [spatialMemoryEnabled, setSpatialMemoryEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.spatialMemoryEnabled) !== 'false')
   const [transcript, setTranscript] = useState('')
   const [plan, setPlan] = useState([])
   const [timing, setTiming] = useState({})
@@ -213,6 +215,8 @@ export function App() {
   const recorderRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const autoAnalyzeAfterStopRef = useRef(false)
+  const voiceOcrBackendRef = useRef(localStorage.getItem(STORAGE_KEYS.voiceOcrBackend) || 'ppocr')
+  const spatialMemoryEnabledRef = useRef(localStorage.getItem(STORAGE_KEYS.spatialMemoryEnabled) !== 'false')
   const shortcutStateRef = useRef({ provider: 'uiohook-napi', enabled: false, error: '', shortcut: null, shortcutLabel: '右 Alt', lastDetectedLabel: '', lastTriggeredAt: '' })
   const meterContextRef = useRef(null)
   const meterAnalyserRef = useRef(null)
@@ -230,7 +234,15 @@ export function App() {
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.provider, selectedProvider) }, [selectedProvider])
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.senseVoiceEnabled, String(senseVoiceEnabled)) }, [senseVoiceEnabled])
   // 语音点选 OCR 后端单独持久化，便于在快速链路和兼容链路之间切换。
-  useEffect(() => { localStorage.setItem(STORAGE_KEYS.voiceOcrBackend, voiceOcrBackend) }, [voiceOcrBackend])
+  useEffect(() => {
+    voiceOcrBackendRef.current = voiceOcrBackend
+    localStorage.setItem(STORAGE_KEYS.voiceOcrBackend, voiceOcrBackend)
+  }, [voiceOcrBackend])
+  // 空间记忆只作用于本地点选链路，单独持久化避免影响其他分析入口。
+  useEffect(() => {
+    spatialMemoryEnabledRef.current = spatialMemoryEnabled
+    localStorage.setItem(STORAGE_KEYS.spatialMemoryEnabled, String(spatialMemoryEnabled))
+  }, [spatialMemoryEnabled])
   useEffect(() => {
     selectedInputDeviceIdRef.current = selectedInputDeviceId
     localStorage.setItem(STORAGE_KEYS.microphoneId, selectedInputDeviceId)
@@ -612,9 +624,15 @@ export function App() {
   // 右 Alt 链路专用：本地 ASR + 语音 FSM，不再走云端 LLM 动作解析。
   async function routeVoiceAudio(filePath) {
     if (!filePath) return
-    appendLog(`语音路由开始：${filePath} · OCR=${voiceOcrBackend}`)
+    const currentVoiceOcrBackend = voiceOcrBackendRef.current
+    const currentSpatialMemoryEnabled = spatialMemoryEnabledRef.current
+    appendLog(`语音路由开始：${filePath} · OCR=${currentVoiceOcrBackend} · 空间记忆=${currentSpatialMemoryEnabled ? 'on' : 'off'}`)
     try {
-      const result = await window.bridgeApi.voiceHandleAudio({ filePath, ocrBackend: voiceOcrBackend })
+      const result = await window.bridgeApi.voiceHandleAudio({
+        filePath,
+        ocrBackend: currentVoiceOcrBackend,
+        spatialMemoryEnabled: currentSpatialMemoryEnabled,
+      })
       const transcript = result?.transcript || ''
       setTranscript(transcript)
       const phase = result?.state?.phase || 'idle'
@@ -945,6 +963,38 @@ export function App() {
                 当前默认后端：{runtimeConfig?.voiceOcr?.backend || 'ppocr'}
               </div>
               <div className="helper-text">RapidOCR 复用 `capabilities/ppocr/.local/.venv` 内的本地模型依赖，不额外新增一套部署。</div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div><div className="section-label">Spatial Memory</div><CardTitle>空间记忆</CardTitle></div>
+            <CardDescription>开启后，本地点选会记住“关键词 -&gt; 窗口内相对位置”，下次优先在当前前台窗口的小区域内做 OCR。</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            <div className="settings-card">
+              <div className="settings-card__row">
+                <div className="settings-status">
+                  <span className={`settings-status__dot ${spatialMemoryEnabled ? 'settings-status__dot--ok' : ''}`} />
+                  <span>{spatialMemoryEnabled ? '空间记忆已启用' : '空间记忆未启用'}</span>
+                </div>
+                <button
+                  type="button"
+                  className={`ui-switch ${spatialMemoryEnabled ? 'ui-switch--checked' : ''}`}
+                  aria-pressed={spatialMemoryEnabled}
+                  onClick={() => setSpatialMemoryEnabled((current) => !current)}
+                >
+                  <span className="ui-switch__thumb" />
+                </button>
+              </div>
+              <div className="helper-text">工作方式：命中当前前台窗口里的历史记忆时，只截小区域做 OCR；失败后自动回退到原来的整屏截图链路。</div>
+              <div className="helper-text">
+                当前已记录：{runtimeConfig?.spatialMemory?.memoryCount ?? 0} 条记忆 / {runtimeConfig?.spatialMemory?.windowCount ?? 0} 个窗口 / {runtimeConfig?.spatialMemory?.appCount ?? 0} 个应用
+              </div>
+              <div className="helper-text">
+                存储位置：{runtimeConfig?.spatialMemory?.filePath || '未初始化'}
+              </div>
             </div>
           </CardContent>
         </Card>

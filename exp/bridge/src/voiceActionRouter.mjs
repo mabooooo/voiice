@@ -75,7 +75,7 @@ export function pickCandidates(ocrLines, keyword, limit = MAX_CANDIDATES) {
 }
 
 export function createVoiceActionRouter(deps) {
-  // deps: { captureAndOcr, highlightCandidates, clearIndicators, clickAt, logger, notifyOverlay }
+  // deps: { captureAndOcr, resolveSpatialMemoryCandidate, rememberSpatialSelection, highlightCandidates, clearIndicators, clickAt, clickWindowPoint, logger, notifyOverlay }
   let state = { phase: 'idle', candidates: [], keyword: '', timer: null }
 
   function log(msg) {
@@ -95,8 +95,34 @@ export function createVoiceActionRouter(deps) {
   // 单候选和确认态共用点击执行，保证两条路径的 overlay 表现一致。
   async function clickCandidate(target, title) {
     deps.notifyOverlay?.({ status: 'executing', title, subtitle: target.text, autoResetMs: 3000 })
+    if (target.windowHandle && Number.isFinite(target.localClickX) && Number.isFinite(target.localClickY)) {
+      await deps.clickWindowPoint?.(target.windowHandle, target.localClickX, target.localClickY)
+      return
+    }
     await deps.clickAt?.(target.clickX, target.clickY)
-    reset('clicked')
+  }
+
+  // 点击完成后再异步回写空间记忆，不阻塞当前动作落地。
+  async function persistSpatialMemory(keyword, target, options = {}) {
+    if (!options.spatialMemoryEnabled || !keyword || !target) {
+      if (!options.spatialMemoryEnabled) {
+        log('[voice] spatial-memory disabled: skip save')
+      } else {
+        log('[voice] spatial-memory skip save: missing keyword or target')
+      }
+      return
+    }
+
+    try {
+      await deps.rememberSpatialSelection?.({
+        keyword,
+        target,
+        backend: options.backend,
+        mode: options.mode || target.source || 'full-ocr',
+      })
+    } catch (error) {
+      log(`[voice] spatial-memory save failed: ${error.message || error}`)
+    }
   }
 
   function armTimeout() {
@@ -118,6 +144,11 @@ export function createVoiceActionRouter(deps) {
         deps.notifyOverlay?.({ status: 'executing', title: `点击 ${idx}`, subtitle: target.text, autoResetMs: 3000 })
         try {
           await clickCandidate(target, `点击 ${idx}`)
+          await persistSpatialMemory(state.keyword, target, {
+            ...options,
+            mode: target.source || 'selection',
+          })
+          reset('clicked')
           return { handled: true, action: 'click', index: idx, target }
         } catch (error) {
           log(`[voice] click failed: ${error.message || error}`)
@@ -144,7 +175,27 @@ export function createVoiceActionRouter(deps) {
     }
     
     log(`[voice] trigger "${trig.keyword}" → OCR...`)
+    log(`[voice] route options: backend=${options.backend || 'ppocr'} spatialMemory=${options.spatialMemoryEnabled ? 'on' : 'off'}`)
     deps.notifyOverlay?.({ status: 'waiting', title: `定位“${trig.keyword}”`, subtitle: '识别屏幕中...' })
+
+    if (options.spatialMemoryEnabled) {
+      try {
+        const memoryTarget = await deps.resolveSpatialMemoryCandidate?.({
+          keyword: trig.keyword,
+          backend: options.backend,
+        })
+        if (memoryTarget) {
+          log(`[voice] spatial-memory direct click "${trig.keyword}" -> "${memoryTarget.text}"`)
+          await clickCandidate(memoryTarget, '记忆点击')
+          reset('clicked')
+          return { handled: true, action: 'click', target: memoryTarget, fromMemory: true }
+        }
+      } catch (error) {
+        log(`[voice] spatial-memory failed: ${error.message || error}`)
+      }
+    } else {
+      log('[voice] spatial-memory disabled: skip lookup')
+    }
 
     let ocr
     try {
@@ -169,15 +220,26 @@ export function createVoiceActionRouter(deps) {
       const [x1, y1, x2, y2] = item.bbox
       const cx = (x1 + x2) / 2
       const cy = (y1 + y2) / 2
+      const logicalLeft = (ocr.displayBounds?.x || 0) + (x1 / ocr.scaleFactor)
+      const logicalTop = (ocr.displayBounds?.y || 0) + (y1 / ocr.scaleFactor)
+      const logicalWidth = Math.max(1, (x2 - x1) / ocr.scaleFactor)
+      const logicalHeight = Math.max(1, (y2 - y1) / ocr.scaleFactor)
       return {
         index: index + 1,
         text: item.text,
         bbox: item.bbox,
+        source: 'full-ocr',
+        logicalRect: {
+          left: logicalLeft,
+          top: logicalTop,
+          width: logicalWidth,
+          height: logicalHeight,
+        },
         overlayRect: {
           left: Math.round(x1 / ocr.scaleFactor),
           top: Math.round(y1 / ocr.scaleFactor),
-          width: Math.max(1, Math.round((x2 - x1) / ocr.scaleFactor)),
-          height: Math.max(1, Math.round((y2 - y1) / ocr.scaleFactor)),
+          width: Math.max(1, Math.round(logicalWidth)),
+          height: Math.max(1, Math.round(logicalHeight)),
         },
         clickX: Math.round(ocr.originX + cx),
         clickY: Math.round(ocr.originY + cy),
@@ -188,6 +250,11 @@ export function createVoiceActionRouter(deps) {
     if (candidates.length === 1) {
       try {
         await clickCandidate(candidates[0], '直接点击')
+        await persistSpatialMemory(trig.keyword, candidates[0], {
+          ...options,
+          mode: candidates[0].source || 'single',
+        })
+        reset('clicked')
         return { handled: true, action: 'click', index: 1, target: candidates[0], autoSelected: true }
       } catch (error) {
         log(`[voice] click failed: ${error.message || error}`)

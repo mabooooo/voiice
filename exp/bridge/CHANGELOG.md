@@ -1,4 +1,8 @@
 # Changelog
+## 0.0.20 空间记忆
+- 新增 [src/appSpatialMemoryStore.mjs](D:/Projects/AI/voiice/exp/bridge/src/appSpatialMemoryStore.mjs)，以“应用 -> 窗口 -> 记忆”结构管理本地点选空间记忆，并落盘到 `.runtime/app-spatial-memory.json`。
+- 设置页新增“空间记忆”开关，默认开启；主进程会返回记忆模块的 `appCount / windowCount / memoryCount / filePath` 供界面展示。
+
 ## 0.0.19 语音 OCR 点选路由 + PP-OCR 托管启动
 
 ### Added
@@ -29,12 +33,17 @@
 - 候选框会在原有 OCR 框基础上居中外扩 `20px` padding，提升可见性与容错。
 - 右 `Alt` 触发的本地点选链路现在会按设置页选择切换 OCR 后端；默认仍保留原有 `PP-OCR`，切到 `RapidOCR` 后会直接调用本地测试脚本链路。
 - 语音耗时日志改为按实际后端输出 `capture completed` 与 `ppocr completed / rapidocr completed`，便于对比两条 OCR 链路的瓶颈位置。
+- 新增“空间记忆优先”分支：当当前前台窗口里存在对应关键词记忆时，先截图该窗口的小区域做 OCR；若命中则直接点击，失败后再回退到原来的整屏 OCR 链路。
+- 空间记忆保存不再直接信任整屏 OCR 的坐标换算，而是在点击后重新截当前窗口并在窗口坐标系内复做一次 OCR，减少高缩放桌面下的记忆偏移。
+- 空间记忆命中后的点击不再走整屏全局坐标推算，而是改为“窗口句柄 + 窗口内局部坐标”点击，复用 `GetWindowRect` 与 `SetCursorPos`，降低多显示器和 DPI 缩放下的偏移风险。
+- 空间记忆命中后不再再次回写记忆，避免每次命中都重复刷新同一条记录。
 
 ### Notes
 
 - 截图坐标采用物理像素，Overlay 绘制采用逻辑像素，点击坐标使用 `display.nativeOrigin + bbox center` 回到物理像素，避免 DPI 缩放下点击偏移。
 - 当前推荐流程为：启动应用后自动托管 PP-OCR，按右 `Alt` 说“点击开发者模式”，屏幕出现编号候选框，再说“3”或“第三个”完成点击。
 - 无麦调试可直接在渲染进程 console 调用：`bridgeApi.voiceRouteText({ transcript: '点击开发者模式' })`。
+- 空间记忆当前主要服务于“同一应用、同一窗口标题、同一关键词”的重复点击场景；如果窗口标题或布局明显变化，仍会自动回退到整屏 OCR。
 
 ## 0.0.18 开发者模式窗口高亮指示
 

@@ -4,6 +4,10 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   getConfigStatus: () => ipcRenderer.invoke('bridge:get-config-status'),
   pickAudioFile: () => ipcRenderer.invoke('bridge:pick-audio-file'),
   saveRecording: (payload) => ipcRenderer.invoke('bridge:save-recording', payload),
+  dictationStartSession: (payload) => ipcRenderer.invoke('bridge:dictation-session-start', payload),
+  dictationStopSession: (payload) => ipcRenderer.invoke('bridge:dictation-session-stop', payload),
+  // 连续听写 PCM 走 send 单向推送，避免高频小块等待 invoke 往返。
+  dictationPushChunk: (payload) => ipcRenderer.send('bridge:dictation-session-push-chunk', payload),
   captureDesktopScreenshot: (payload) => ipcRenderer.invoke('bridge:capture-desktop-screenshot', payload),
   probeOmniParser: (payload) => ipcRenderer.invoke('bridge:probe-omniparser', payload),
   probePPOcr: (payload) => ipcRenderer.invoke('bridge:probe-ppocr', payload),
@@ -22,6 +26,11 @@ contextBridge.exposeInMainWorld('bridgeApi', {
     const handler = (_event, payload) => callback(payload)
     ipcRenderer.on('bridge:voice-log', handler)
     return () => ipcRenderer.removeListener('bridge:voice-log', handler)
+  },
+  onDictationEvent: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('bridge:dictation-event', handler)
+    return () => ipcRenderer.removeListener('bridge:dictation-event', handler)
   },
   matchTranscript: (payload) => ipcRenderer.invoke('bridge:match-transcript', payload),
   executePlan: (payload) => ipcRenderer.invoke('bridge:execute-plan', payload),

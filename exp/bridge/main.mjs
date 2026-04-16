@@ -10,6 +10,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeImage, screen } from 'electr
 
 import { AppSpatialMemoryStore } from './src/appSpatialMemoryStore.mjs'
 import { captureDesktopScreenshots } from './src/desktopCapture.mjs'
+import { MainDictationSession } from './src/dictationSession.mjs'
 import { parseAudioIntentWithWindows, parseIntentWithWindows } from './src/intentParser.mjs'
 import { probeOmniParser, testOmniParserWithImage } from './src/omniParserClient.mjs'
 import { probePPOcr, testPPOcrWithImage } from './src/ppOcrClient.mjs'
@@ -48,6 +49,7 @@ const windowRegistry = new WindowRegistry()
 let mainWindow = null
 let overlayWindow = null
 let overlayResetTimer = null
+let lastOverlayLogKey = ''
 let indicatorWindows = []
 let indicatorResetTimer = null
 let recordingByShortcut = false
@@ -67,6 +69,8 @@ let managedPPOcrState = {
   warmed: false,
 }
 let voiceRouter = null
+let dictationSession = null
+let nextDictationSessionId = 1
 const spatialMemoryStore = new AppSpatialMemoryStore({
   filePath: runtimeSpatialMemoryPath,
 })
@@ -1387,6 +1391,45 @@ async function saveRecordingToTemp({ bytes, mimeType }) {
   return filePath
 }
 
+function pushDictationEvent(payload) {
+  if (!payload) return
+  mainWindow?.webContents.send('bridge:dictation-event', payload)
+}
+
+function logVoiceMessage(message) {
+  const at = new Date().toISOString()
+  const line = `[${at}] ${message}`
+  console.log(line)
+  mainWindow?.webContents.send('bridge:voice-log', { message: line, at })
+}
+
+// 本地语音入口统一收口到这里，避免快捷键链路和主进程连续听写各自维护一份逻辑。
+async function handleVoiceAudioPayload(payload = {}) {
+  console.log(`[voice] ASR start file=${payload.filePath || ''} lang=${payload.language || 'auto'} ocr=${normalizeVoiceOcrBackend(payload.ocrBackend)} spatial=${Boolean(payload.spatialMemoryEnabled)}`)
+  await ensureManagedSenseVoiceServiceReady()
+  // language 由 renderer 或主进程听写会话透传过来（auto / zh / en / ja / ko / yue）。
+  const asr = await transcribeSenseVoiceAudio(payload.filePath, {
+    ...payload,
+    language: payload.language,
+  })
+  const transcript = String(asr.text || '').trim()
+  console.log(`[voice] ASR done text="${transcript}" latency=${asr.localLatencyMs ?? '-'}ms converted=${Boolean(asr.convertedToWav)}`)
+  const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
+    backend: normalizeVoiceOcrBackend(payload.ocrBackend),
+    spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
+  }) : { handled: false, reason: 'router-missing' }
+  console.log(`[voice] route handled=${Boolean(routed?.handled)} reason=${routed?.reason || ''} phase=${voiceRouter?.getState()?.phase || 'idle'}`)
+  return { transcript, asr, routed, state: voiceRouter?.getState() }
+}
+
+async function stopDictationSession(reason = 'manual') {
+  const activeSession = dictationSession
+  dictationSession = null
+  if (!activeSession) return { ok: true, reason, active: false }
+  await activeSession.stop(reason)
+  return { ok: true, reason, active: true }
+}
+
 app.whenReady().then(async () => {
   await spatialMemoryStore.load()
   startManagedSenseVoiceService().catch((error) => {
@@ -1506,6 +1549,49 @@ app.whenReady().then(async () => {
     return saveRecordingToTemp(payload)
   })
 
+  ipcMain.handle('bridge:dictation-session-start', async (_event, payload = {}) => {
+    await stopDictationSession('restart')
+    const sessionId = nextDictationSessionId
+    nextDictationSessionId += 1
+
+    // 主进程接管会话后，renderer 只需要持续喂 PCM 块，不再关心断句细节。
+    dictationSession = new MainDictationSession({
+      sessionId,
+      language: payload.language,
+      ocrBackend: normalizeVoiceOcrBackend(payload.ocrBackend),
+      spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
+      logger: (message) => logVoiceMessage(message),
+      emitEvent: (eventPayload) => pushDictationEvent(eventPayload),
+      saveRecording: (recordingPayload) => saveRecordingToTemp(recordingPayload),
+      routeAudio: (audioPayload) => handleVoiceAudioPayload(audioPayload),
+    })
+
+    pushDictationEvent({ type: 'started', sessionId })
+    // logVoiceMessage(`[dictation-main] session started id=${sessionId} lang=${payload.language || 'auto'}`)
+    return { ok: true, sessionId, sampleRate: 16000 }
+  })
+
+  ipcMain.on('bridge:dictation-session-push-chunk', (_event, payload = {}) => {
+    if (!dictationSession) return
+    if (payload.sessionId !== dictationSession.sessionId) return
+    try {
+      dictationSession.pushChunk(payload.samples, payload.sampleRate)
+    } catch (error) {
+      const message = String(error?.message || error)
+      pushDictationEvent({
+        type: 'error',
+        sessionId: payload.sessionId,
+        stage: 'push-chunk',
+        message,
+      })
+      logVoiceMessage(`[dictation-main] push chunk failed: ${message}`)
+    }
+  })
+
+  ipcMain.handle('bridge:dictation-session-stop', async (_event, payload = {}) => {
+    return stopDictationSession(payload.reason || 'manual')
+  })
+
   ipcMain.handle('bridge:capture-desktop-screenshot', async (_event, payload = {}) => {
     // 桌面分析统一落盘到项目本地目录，便于后续人工检查与离线处理。
     return captureDesktopScreenshots({
@@ -1598,23 +1684,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('bridge:voice-handle-audio', async (_event, payload = {}) => {
     // 右 Alt 链路专用：本地 SenseVoice 转写 → 送入语音 FSM；云端 LLM 链路在这条链路里暂时禁用。
-    console.log(`[voice] ASR start file=${payload.filePath || ''} lang=${payload.language || 'auto'} ocr=${normalizeVoiceOcrBackend(payload.ocrBackend)} spatial=${Boolean(payload.spatialMemoryEnabled)}`)
-    await ensureManagedSenseVoiceServiceReady()
-    // language 由 renderer 设置透传过来（auto / zh / en / ja / ko / yue），
-    // 连续听写模式下每一句都复用同一个首选语言。
-    const asr = await transcribeSenseVoiceAudio(payload.filePath, {
-      ...payload,
-      language: payload.language,
-    })
-    const transcript = String(asr.text || '').trim()
-    // 终端诊断：看到这里说明本地 SenseVoice 已经真正返回结果。
-    console.log(`[voice] ASR done text="${transcript}" latency=${asr.localLatencyMs ?? '-'}ms converted=${Boolean(asr.convertedToWav)}`)
-    const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
-      backend: normalizeVoiceOcrBackend(payload.ocrBackend),
-      spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
-    }) : { handled: false, reason: 'router-missing' }
-    console.log(`[voice] route handled=${Boolean(routed?.handled)} reason=${routed?.reason || ''} phase=${voiceRouter?.getState()?.phase || 'idle'}`)
-    return { transcript, asr, routed, state: voiceRouter?.getState() }
+    return handleVoiceAudioPayload(payload)
   })
 
   ipcMain.handle('bridge:voice-route-text', async (_event, payload = {}) => {
@@ -1699,9 +1769,17 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.on('bridge:overlay-state', (_event, payload) => {
-    // 终端里记录 overlay 状态切换，便于判断 renderer 当前停在 listening / waiting / idle 哪一步。
+    // 终端里只记录“文字语义发生变化”的 overlay 状态，避免音量电平更新把日志刷满。
     if (payload?.status) {
-      console.log(`[overlay] status=${payload.status} title=${payload.title || ''} subtitle=${payload.subtitle || ''}`)
+      const logKey = JSON.stringify({
+        status: payload.status || '',
+        title: payload.title || '',
+        subtitle: payload.subtitle || '',
+      })
+      if (logKey !== lastOverlayLogKey) {
+        lastOverlayLogKey = logKey
+        console.log(`[overlay] status=${payload.status} title=${payload.title || ''} subtitle=${payload.subtitle || ''}`)
+      }
     }
     if (payload?.status === 'listening') {
       recordingByShortcut = true
@@ -1732,6 +1810,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   disposeIndicatorWindows()
+  void stopDictationSession('app-quit')
   stopManagedSenseVoiceService()
   stopManagedPPOcrService()
   shortcutManager.stop()

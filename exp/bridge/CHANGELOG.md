@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.22 主进程连续听写会话 + 日志降噪
+
+### Added
+
+- 新增 [src/dictationSession.mjs](D:/Projects/AI/voiice/exp/bridge/src/dictationSession.mjs)，由主进程接管连续听写会话，负责 `pre-roll`、轻量断句、WAV 封包、SenseVoice 调用和语音路由。
+- 新增 [src-ui/lib/dictation/pcmCapture.js](D:/Projects/AI/voiice/exp/bridge/src-ui/lib/dictation/pcmCapture.js)，renderer 现在只负责麦克风 PCM 采集、重采样到 `16kHz`，并按固定 chunk 推给主进程。
+- preload 新增 `dictationStartSession / dictationPushChunk / dictationStopSession / onDictationEvent`，用于跨进程连续听写会话。
+
+### Changed
+
+- 连续听写链路从“renderer 内 VAD/FSM/WAV”改为“renderer 采集 PCM -> main 断句 -> 每句 WAV -> `voiceHandleAudio`”，把句子状态和 ASR 触发统一收口到主进程。
+- `main.mjs` 新增 `bridge:dictation-session-start / push-chunk / stop` IPC，并把本地语音入口收口到 `handleVoiceAudioPayload()`，避免连续听写和普通右 `Alt` 路径维护两套 ASR 路由逻辑。
+- [docs/voice-dictation.md](D:/Projects/AI/voiice/exp/bridge/docs/voice-dictation.md) 更新为当前主进程连续听写架构，补充了新边界、参数和排查方式。
+- overlay 日志现在只在 `status / title / subtitle` 发生实际变化时打印，不再因电平刷新而在终端重复刷屏。
+
+### Fixed
+
+- 修复连续听写在 renderer 中能采到麦克风、但无法稳定进入 ASR 的问题，现改为由主进程统一完成断句和单句提交。
+- 修复连续听写终端日志过多的问题，关闭了主进程高频 `phase -> in/post/idle` 诊断日志，只保留启动、封句、结果和错误等高价值日志。
+
 ## 0.0.21 连续听写 + 首选语言
 
 ### Added

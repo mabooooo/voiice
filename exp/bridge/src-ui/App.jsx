@@ -10,9 +10,8 @@ import { DesktopCapturePanel } from '@/features/desktop-utilities/DesktopCapture
 import { OmniParserPanel } from '@/features/desktop-utilities/OmniParserPanel'
 import { PPOcrPanel } from '@/features/desktop-utilities/PPOcrPanel'
 import { WindowManagementPanel } from '@/features/window-management/WindowManagementPanel'
-// 连续听写管线：renderer 内 Silero VAD + FSM，每封包一句就落盘并送本地 ASR。
-import { startDictationPipeline } from '@/lib/dictation/audioPipeline'
-import { encodeWavPcm16 } from '@/lib/dictation/wavEncoder'
+// 连续听写采集器：renderer 只负责 PCM 采集，断句/ASR/路由都放到主进程。
+import { startDictationPcmCapture } from '@/lib/dictation/pcmCapture'
 
 // 主控制台页面：负责串起音频输入、动作执行、窗口管理和设置页切换。
 const ACTIVE_MENU = { developer: 'developer', settings: 'settings' }
@@ -250,7 +249,6 @@ export function App() {
   const dictationActiveRef = useRef(false)
   const dictationHandleRef = useRef(null)
   const preferredLanguageRef = useRef(localStorage.getItem(STORAGE_KEYS.preferredLanguage) || 'auto')
-  const dictationUtteranceSeqRef = useRef(0)
   const shortcutStateRef = useRef({ provider: 'uiohook-napi', enabled: false, error: '', shortcut: null, shortcutLabel: '右 Alt', lastDetectedLabel: '', lastTriggeredAt: '' })
   const meterContextRef = useRef(null)
   const meterAnalyserRef = useRef(null)
@@ -305,11 +303,67 @@ export function App() {
     setLogs((current) => [`[${time}] ${message}`, ...current].slice(0, 80))
   }
 
-  // 连续听写的大部分状态发生在 renderer，额外转发到主进程终端后更容易做跨进程排查。
+  // 连续听写采集仍在 renderer，采集侧日志继续转发到主进程终端方便排查。
   function forwardVoiceDebugLog(message) {
     try {
       window.bridgeApi.voiceLog?.({ message })
     } catch {}
+  }
+
+  // 主进程听写事件统一从这里回填 UI，避免 renderer 再维护一套句子状态机。
+  function handleDictationEvent(event = {}) {
+    if (!event?.type) return
+
+    if (event.type === 'phase') {
+      const nextPhase = event.phase || 'idle'
+      setDictationPhase(nextPhase)
+      return
+    }
+
+    if (event.type === 'queued') {
+      appendLog(`句 #${event.seq} 已送主进程断句，时长 ${Math.round(event.durationMs || 0)}ms。`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'waiting',
+        title: `识别句 #${event.seq}`,
+        subtitle: `${Math.round(event.durationMs || 0)}ms · ${preferredLanguageRef.current}`,
+      })
+      return
+    }
+
+    if (event.type === 'result') {
+      setTranscript(event.transcript || '')
+      appendLog(`句 #${event.seq} ASR="${event.transcript || ''}" → ${event.action || 'no-trigger'} · phase=${event.phase || 'idle'}`)
+      if (dictationActiveRef.current) {
+        window.bridgeApi.notifyOverlayState({
+          status: 'listening',
+          title: '连续听写中',
+          subtitle: `上一句：${event.transcript || '(空)'}`,
+          level: 0.15,
+        })
+      }
+      return
+    }
+
+    if (event.type === 'dropped') {
+      appendLog(`主进程丢弃短句：${Math.round(event.durationMs || 0)}ms · reason=${event.reason || 'unknown'}`)
+      return
+    }
+
+    if (event.type === 'error') {
+      appendLog(`连续听写出错: ${event.message || 'unknown error'}`)
+      window.bridgeApi.notifyOverlayState({
+        status: 'executing',
+        title: '连续听写出错',
+        subtitle: String(event.message || 'unknown error'),
+        autoResetMs: 4000,
+      })
+      return
+    }
+
+    if (event.type === 'stopped') {
+      setDictationPhase('idle')
+      setDictationStatus('已停止')
+    }
   }
 
   function updateSelectedInputDeviceId(nextDeviceId) {
@@ -370,7 +424,7 @@ export function App() {
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange)
 
     const unsubscribeToggle = window.bridgeApi.onRecordingToggle(async ({ recording, shortcutLabel }) => {
-      // 连续听写开启时：按键切换常驻 VAD；关闭时维持原始"按键开始 / 再按结束"整段上传链路。
+      // 连续听写开启时：按键切换主进程听写会话；关闭时维持原始"按键开始 / 再按结束"整段上传链路。
       if (dictationEnabledRef.current) {
         if (recording) {
           appendLog(`${shortcutLabel || '全局快捷键'}已触发，进入连续听写。`)
@@ -387,12 +441,17 @@ export function App() {
     })
     const unsubscribeShortcutState = window.bridgeApi.onShortcutState((state) => setShortcutState(state))
     const unsubscribeVoiceLog = window.bridgeApi.onVoiceLog?.(({ message }) => appendLog(message)) || (() => {})
+    const unsubscribeDictationEvent = window.bridgeApi.onDictationEvent?.((event) => handleDictationEvent(event)) || (() => {})
 
     return () => {
       unsubscribeToggle()
       unsubscribeShortcutState()
       unsubscribeVoiceLog()
+      unsubscribeDictationEvent()
       navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange)
+      if (dictationHandleRef.current) {
+        void stopDictationMode('unmount')
+      }
     }
   }, [])
 
@@ -723,42 +782,11 @@ export function App() {
     }
   }
 
-  // 每封包一句就走这里：Float32 PCM → 16-bit WAV → save-recording 临时落盘 → voiceHandleAudio。
-  // 每句独立送给 ASR，FSM 可以并发在飞；显示时用序号区分。
-  async function handleDictationUtterance({ samples, durationMs, peakProb, peakRms }) {
-    const seq = ++dictationUtteranceSeqRef.current
-    try {
-      const wav = encodeWavPcm16(samples)
-      const tempPath = await window.bridgeApi.saveRecording({
-        bytes: Array.from(wav),
-        mimeType: 'audio/wav',
-      })
-      appendLog(`句 #${seq} 封包 ${durationMs.toFixed(0)}ms peakProb=${peakProb.toFixed(2)} peakRms=${peakRms.toFixed(4)} → ${tempPath}`)
-      window.bridgeApi.notifyOverlayState({
-        status: 'waiting',
-        title: `识别句 #${seq}`,
-        subtitle: `${durationMs.toFixed(0)}ms · ${preferredLanguageRef.current}`,
-      })
-      const routed = await routeVoiceAudio(tempPath)
-      if (routed && dictationActiveRef.current) {
-        // 听写没停就继续等下一句，overlay 状态回到"监听中"的提示态。
-        window.bridgeApi.notifyOverlayState({
-          status: 'listening',
-          title: '连续听写中',
-          subtitle: `上一句：${routed.transcript || '(空)'}`,
-          level: 0.15,
-        })
-      }
-    } catch (error) {
-      appendLog(`句 #${seq} 处理失败: ${error.message || error}`)
-    }
-  }
-
   async function startDictationMode(triggeredByShortcut = false) {
     if (dictationActiveRef.current) return
     dictationActiveRef.current = true
     setDictationActive(true)
-    setDictationStatus('初始化 VAD 中...')
+    setDictationStatus('初始化主进程听写中...')
     setDictationPhase('idle')
     const deviceId = selectedInputDeviceIdRef.current
     const microphoneLabel = getSelectedMicrophoneLabel(deviceId)
@@ -773,23 +801,47 @@ export function App() {
     })
 
     try {
-      const handle = await startDictationPipeline({
+      // 先在主进程里创建会话，再开始持续推 PCM，避免 renderer 先采到数据却没有接收端。
+      const session = await window.bridgeApi.dictationStartSession({
+        language: preferredLanguageRef.current,
+        ocrBackend: voiceOcrBackendRef.current,
+        spatialMemoryEnabled: spatialMemoryEnabledRef.current,
+      })
+      const handle = await startDictationPcmCapture({
         deviceId,
         logger: (message) => {
           appendLog(message)
           forwardVoiceDebugLog(message)
         },
-        onUtterance: (utterance) => { void handleDictationUtterance(utterance) },
-        onPhaseChange: ({ to }) => setDictationPhase(to),
+        onChunk: (samples) => {
+          window.bridgeApi.dictationPushChunk({
+            sessionId: session.sessionId,
+            sampleRate: session.sampleRate || 16000,
+            samples,
+          })
+        },
+        onLevel: (level) => {
+          if (!dictationActiveRef.current) return
+          window.bridgeApi.notifyOverlayState({
+            status: 'listening',
+            title: '连续听写中',
+            subtitle: triggeredByShortcut ? '再按同一快捷键结束' : '等待你开口',
+            level,
+          })
+        },
         onError: (error) => {
-          appendLog(`连续听写出错: ${error.message || error}`)
-          forwardVoiceDebugLog(`连续听写出错: ${error.message || error}`)
+          appendLog(`连续听写采集出错: ${error.message || error}`)
+          forwardVoiceDebugLog(`连续听写采集出错: ${error.message || error}`)
         },
       })
-      dictationHandleRef.current = handle
-      setDictationStatus(`监听中 · 首选语言=${preferredLanguageRef.current}`)
-      appendLog(`连续听写已开启，首选语言=${preferredLanguageRef.current}，输入设备=${microphoneLabel}。`)
+      dictationHandleRef.current = {
+        ...handle,
+        sessionId: session.sessionId,
+      }
+      appendLog(`连续听写已开启，主进程会话=${session.sessionId}，首选语言=${preferredLanguageRef.current}，输入设备=${microphoneLabel}。`)
     } catch (error) {
+      // 启动中任一步失败都立刻回收主进程会话，避免残留半开状态。
+      await window.bridgeApi.dictationStopSession({ reason: 'start-failed' }).catch(() => {})
       appendLog(`连续听写启动失败: ${error.message || error}`)
       dictationActiveRef.current = false
       setDictationActive(false)
@@ -804,16 +856,22 @@ export function App() {
     const handle = dictationHandleRef.current
     dictationActiveRef.current = false
     setDictationActive(false)
-    setDictationStatus('已停止')
-    setDictationPhase('idle')
     if (handle) {
       try {
-        await handle.stop({ flushReason: reason })
+        await handle.stop()
+        await window.bridgeApi.dictationStopSession({
+          sessionId: handle.sessionId,
+          reason,
+        })
       } catch (error) {
         appendLog(`停止连续听写出错: ${error.message || error}`)
       }
+    } else {
+      await window.bridgeApi.dictationStopSession({ reason }).catch(() => {})
     }
     dictationHandleRef.current = null
+    setDictationStatus('已停止')
+    setDictationPhase('idle')
     window.bridgeApi.notifyOverlayState({ status: 'idle', title: 'Voice Bridge', subtitle: '' })
     appendLog(`连续听写已停止 (${reason})。`)
   }
@@ -1089,7 +1147,7 @@ export function App() {
         <Card>
           <CardHeader>
             <div><div className="section-label">Continuous Dictation</div><CardTitle>连续听写</CardTitle></div>
-            <CardDescription>关闭时保持"按键开始 → 再按结束 → 整段上传"原始链路；开启时快捷键切换常驻 VAD，自动断句分别送 ASR。</CardDescription>
+            <CardDescription>关闭时保持"按键开始 → 再按结束 → 整段上传"原始链路；开启时快捷键切换主进程连续听写会话，自动断句分别送 ASR。</CardDescription>
           </CardHeader>
           <CardContent className="stack">
             <div className="settings-card">
@@ -1107,13 +1165,13 @@ export function App() {
                   <span className="ui-switch__thumb" />
                 </button>
               </div>
-              <div className="helper-text">链路：getUserMedia → AudioWorklet (32ms / 帧) → Silero VAD → 状态机(idle/pre/in/post) → 每句 WAV → SenseVoice。</div>
+              <div className="helper-text">链路：getUserMedia → renderer 16k PCM 分块 → main 连续听写会话 → 每句 WAV → SenseVoice → voiceRouter。</div>
               <div className="helper-text">关闭时，按下录音键开始到再次按下结束之前，本地不做任何处理，只收集为完整一段后再上传。</div>
               <div className="helper-text">
                 当前：{dictationActive ? `监听中 · 阶段=${DICTATION_PHASE_LABEL[dictationPhase] || dictationPhase}` : dictationStatus}
               </div>
               <div className="helper-text">
-                短句门控：{`${'<'}180ms 直接丢弃；180–320ms 需要 VAD 峰值 ≥0.70 且 RMS 超过噪声基线×1.8；>320ms 一律保留。阈值设计使"对/不对/好/可以/嗯/同意"可稳定保留。`}
+                当前断句：主进程按噪声基线、自适应能量阈值和句尾静音时间做轻量判定；后续若需要，再把更强的 VAD 补回主进程。
               </div>
             </div>
           </CardContent>

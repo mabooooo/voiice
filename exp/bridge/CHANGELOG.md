@@ -1,4 +1,34 @@
 # Changelog
+
+## 0.0.21 连续听写 + 首选语言
+
+### Added
+
+- 新增 renderer 侧连续听写管线 [src-ui/lib/dictation/](D:/Projects/AI/voiice/exp/bridge/src-ui/lib/dictation/)，由 `audioPipeline → silero (VAD) → fsm → wavEncoder` 组成一条纯本地的"VAD 端点检测 + 自动断句"链路。
+- 新增 [public/vad-worklet.js](D:/Projects/AI/voiice/exp/bridge/public/vad-worklet.js)：AudioWorklet 把 128 采样 quantum 聚合成 `512 采样 / 32ms` 帧，推送给主线程做 VAD 推理。
+- 新增 Silero VAD 离线资产：`npm run vendor:silero` 会下载 `silero_vad.onnx` 并把 `onnxruntime-web` 的 `.wasm / .mjs` 同步到 `public/ort/`。
+- 新增薄 FSM：`idle → pre → in → post → idle`，参数见 [fsm.js](D:/Projects/AI/voiice/exp/bridge/src-ui/lib/dictation/fsm.js) `DEFAULT_CONFIG`；起点敏捷（`vadEnter=0.45`、`preSpeechMs=96`），终点保守（`endSilenceMs=700`、`preRollMs=400`、`maxUtteranceMs=15s`）。
+- 新增双缓冲：`RingBuffer` 保存最近 `400ms` 原始音频用于 pre-roll；`utteranceBuffer` 在 `in/post` 阶段累积当前句，封包时按最后一次 speech 帧截断尾部静音。
+- 新增短句二重门控：`<180ms` 直接丢弃；`180~320ms` 需满足 `VAD 峰值 ≥ 0.70 且 RMS > 噪声基线 × 1.8` 才保留，用于稳定留下"对 / 不对 / 好 / 可以 / 嗯 / 同意"这类极短指令，同时滤掉咳嗽、键盘噼啪。
+- 新增首选语言设置（`auto / zh / en / ja / ko / yue`），持久化到 `localStorage`，每句识别请求都带上。
+- 设置页新增"连续听写"开关与"首选语言"下拉，说明文案同步给出 auto 与固定语言的取舍。
+- 新增文档 [docs/voice-dictation.md](D:/Projects/AI/voiice/exp/bridge/docs/voice-dictation.md)，记录端到端链路、参数取值、常见调优方向。
+
+### Changed
+
+- 全局快捷键（默认右 `Alt`）行为现在按"连续听写"开关分流：
+  - 关闭时保持原始"按一次开始录音，再按一次结束并整段上传"链路，本地不做任何实时处理。
+  - 开启时第一次按键进入常驻听写；每封一个端点就独立 `saveRecording → voiceHandleAudio`；再按一次退出。
+- `bridge:voice-handle-audio` 与 `transcribeSenseVoiceAudio` 现在会透传 `language` 字段到本地 SenseVoice 服务。
+- [capabilities/sensevoice/service/server.py](D:/Projects/AI/voiice/exp/bridge/capabilities/sensevoice/service/server.py) 支持 per-request `language` 覆盖：白名单 `auto / zh / en / ja / ko / yue`，非法值回落到启动默认。
+- 渲染层构建输出新增 `renderer-dist/silero_vad.onnx`、`renderer-dist/ort/`、`renderer-dist/vad-worklet.js`，以便 Electron `file://` 环境下 ES 动态导入。
+
+### Notes
+
+- 连续听写模式使用的 MediaStream 与现有"按键录音"完全独立：关闭 AGC/NS/EC，固定 `16kHz mono`，与 Silero VAD 的原生采样率对齐；设备采样率不等于 16kHz 时做线性重采样。
+- VAD 推理固定走 `wasm` backend + `numThreads=1 + proxy=false`，在 Electron `file://` 下最稳定；首帧会用全零帧预热一次，避免 JIT 带来的首 ~200ms 延迟。
+- 当前所有 UI 仍只展示 ASR 转写文本；后续如果要给用户即时反馈 FSM 阶段，可以直接消费 `audioPipeline.getSnapshot().phase`。
+
 ## 0.0.20 空间记忆
 - 新增 [src/appSpatialMemoryStore.mjs](D:/Projects/AI/voiice/exp/bridge/src/appSpatialMemoryStore.mjs)，以“应用 -> 窗口 -> 记忆”结构管理本地点选空间记忆，并落盘到 `.runtime/app-spatial-memory.json`。
 - 设置页新增“空间记忆”开关，默认开启；主进程会返回记忆模块的 `appCount / windowCount / memoryCount / filePath` 供界面展示。

@@ -46,6 +46,15 @@ export async function probeSenseVoice(options = {}) {
   }
 }
 
+// 语言白名单：与 SenseVoice 官方支持保持一致，非法值统一回落到 auto，避免服务端报错。
+const ALLOWED_LANGUAGES = new Set(['auto', 'zh', 'en', 'ja', 'ko', 'yue'])
+
+function normalizeLanguage(value) {
+  if (!value) return null
+  const lowered = String(value).toLowerCase()
+  return ALLOWED_LANGUAGES.has(lowered) ? lowered : null
+}
+
 export async function transcribeSenseVoiceAudio(filePath, options = {}) {
   const resolvedPath = path.resolve(filePath)
   let prepared = null
@@ -55,6 +64,7 @@ export async function transcribeSenseVoiceAudio(filePath, options = {}) {
     prepared = await prepareAudioForUpload(resolvedPath, { forceFormat: 'wav' })
     const buffer = await fsPromises.readFile(prepared.uploadPath)
     const startedAt = Date.now()
+    const language = normalizeLanguage(options.language)
     const { baseURL, payload } = await requestSenseVoice('/transcribe/', {
       ...options,
       method: 'POST',
@@ -64,6 +74,8 @@ export async function transcribeSenseVoiceAudio(filePath, options = {}) {
         stream: Boolean(options.stream),
         use_vad: Boolean(options.useVad),
         chunk_duration_ms: options.chunkDurationMs ?? 600,
+        // language 仅在用户显式指定时下发，否则用服务端启动时的默认（通常是 auto）。
+        ...(language ? { language } : {}),
       }),
     })
 
@@ -79,7 +91,7 @@ export async function transcribeSenseVoiceAudio(filePath, options = {}) {
       mode: payload.mode || 'sensevoice-small',
       stream: Boolean(payload.stream),
       useVad: Boolean(payload.use_vad),
-      language: payload.language || '',
+      language: payload.language || language || '',
       chunks: Array.isArray(payload.chunks) ? payload.chunks : [],
       rawResult: payload.raw_result || null,
     }

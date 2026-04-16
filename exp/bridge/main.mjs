@@ -1593,7 +1593,12 @@ app.whenReady().then(async () => {
   ipcMain.handle('bridge:voice-handle-audio', async (_event, payload = {}) => {
     // 右 Alt 链路专用：本地 SenseVoice 转写 → 送入语音 FSM；云端 LLM 链路在这条链路里暂时禁用。
     await ensureManagedSenseVoiceServiceReady()
-    const asr = await transcribeSenseVoiceAudio(payload.filePath, payload)
+    // language 由 renderer 设置透传过来（auto / zh / en / ja / ko / yue），
+    // 连续听写模式下每一句都复用同一个首选语言。
+    const asr = await transcribeSenseVoiceAudio(payload.filePath, {
+      ...payload,
+      language: payload.language,
+    })
     const transcript = String(asr.text || '').trim()
     const routed = voiceRouter ? await voiceRouter.handleTranscript(transcript, {
       backend: normalizeVoiceOcrBackend(payload.ocrBackend),

@@ -48,12 +48,26 @@ def ensure_ready():
 ensure_ready()
 
 
+ALLOWED_LANGUAGES = {"auto", "zh", "en", "ja", "ko", "yue"}
+
+
 class TranscribeRequest(BaseModel):
     audio_base64: str
     format: str = "wav"
     stream: bool = False
     use_vad: bool = False
     chunk_duration_ms: int = 600
+    # per-request 语言覆盖；缺省沿用启动参数，便于长期用户固定到 zh/en 提升精度。
+    language: str | None = None
+
+
+def resolve_request_language(request_language):
+    if not request_language:
+        return ARGS.language
+    normalized = str(request_language).strip().lower()
+    if normalized not in ALLOWED_LANGUAGES:
+        return ARGS.language
+    return normalized
 
 
 def resolve_device():
@@ -101,12 +115,12 @@ def extract_text_from_result(result):
     return str(item or "").strip()
 
 
-def transcribe_audio_file(audio_path, use_vad=False):
+def transcribe_audio_file(audio_path, use_vad=False, language=None):
     # 非流式模式直接跑整段音频，适合验证最终完整文本。
     generate_kwargs = {
         "input": str(audio_path),
         "cache": {},
-        "language": ARGS.language,
+        "language": language or ARGS.language,
         "use_itn": True,
     }
     if use_vad:
@@ -133,12 +147,13 @@ def normalize_audio_samples(audio_path):
     return np.asarray(audio_data, dtype="float32"), int(sample_rate)
 
 
-def transcribe_audio_stream(audio_path, chunk_duration_ms=600, use_vad=False):
+def transcribe_audio_stream(audio_path, chunk_duration_ms=600, use_vad=False, language=None):
     # SenseVoice 不是原生流式模型，这里按固定时间窗切块做开发者流式测试。
     audio_data, sample_rate = normalize_audio_samples(audio_path)
     chunk_size = max(int(sample_rate * max(chunk_duration_ms, 200) / 1000), 1)
     chunks = []
     chunk_texts = []
+    effective_language = language or ARGS.language
 
     for index, start in enumerate(range(0, len(audio_data), chunk_size)):
         end = min(start + chunk_size, len(audio_data))
@@ -146,7 +161,7 @@ def transcribe_audio_stream(audio_path, chunk_duration_ms=600, use_vad=False):
         result = get_model(use_vad).generate(
             input=audio_data[start:end],
             cache={},
-            language=ARGS.language,
+            language=effective_language,
             use_itn=True,
             batch_size=1,
         )
@@ -194,14 +209,20 @@ async def transcribe(request: TranscribeRequest):
             temp_audio_path = Path(temp_file.name)
 
         started_at = time.time()
+        effective_language = resolve_request_language(request.language)
         if request.stream:
             result = transcribe_audio_stream(
                 temp_audio_path,
                 chunk_duration_ms=request.chunk_duration_ms,
                 use_vad=request.use_vad,
+                language=effective_language,
             )
         else:
-            result = transcribe_audio_file(temp_audio_path, use_vad=request.use_vad)
+            result = transcribe_audio_file(
+                temp_audio_path,
+                use_vad=request.use_vad,
+                language=effective_language,
+            )
         latency = time.time() - started_at
 
         return {
@@ -210,7 +231,7 @@ async def transcribe(request: TranscribeRequest):
             "mode": "sensevoice-small",
             "stream": request.stream,
             "use_vad": request.use_vad,
-            "language": ARGS.language,
+            "language": effective_language,
             "text": result["text"],
             "chunks": result.get("chunks", []),
             "raw_result": result["raw_result"],

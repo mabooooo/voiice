@@ -32,7 +32,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Bridge PP-OCRv5 mobile local server")
     parser.add_argument("--host", default=os.environ.get("PPOCR_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PPOCR_PORT", "8020")))
-    parser.add_argument("--device", default=os.environ.get("PPOCR_DEVICE", "cpu"))
+    parser.add_argument("--device", default=os.environ.get("PPOCR_DEVICE", "gpu"))
     parser.add_argument("--det-model-name", default=os.environ.get("PPOCR_DET_MODEL_NAME", "PP-OCRv5_mobile_det"))
     parser.add_argument("--rec-model-name", default=os.environ.get("PPOCR_REC_MODEL_NAME", "PP-OCRv5_mobile_rec"))
     parser.add_argument("--cpu-threads", type=int, default=int(os.environ.get("PPOCR_CPU_THREADS", DEFAULT_CPU_THREADS)))
@@ -44,7 +44,13 @@ def parse_args():
     return parser.parse_args()
 
 
+def normalize_device(device):
+    normalized = str(device or "cpu").strip().lower()
+    return "gpu" if normalized in ("gpu", "cuda", "cuda:0", "0") else "cpu"
+
+
 ARGS = parse_args()
+ARGS.device = normalize_device(ARGS.device)
 
 
 def ensure_ready():

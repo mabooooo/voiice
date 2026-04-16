@@ -77,7 +77,18 @@ let managedPPOcrState = {
   status: 'idle',
   pid: null,
   lastError: '',
+  profile: '',
+  device: '',
   warmed: false,
+}
+let managedOmniParserProcess = null
+let managedOmniParserState = {
+  autostart: process.env.OMNIPARSER_AUTOSTART === 'true',
+  status: 'idle',
+  pid: null,
+  lastError: '',
+  profile: '',
+  device: '',
 }
 let voiceRouter = null
 let dictationSession = null
@@ -113,6 +124,7 @@ const CORNER_INDICATOR_BORDER = 8
 const WINDOW_HIGHLIGHT_DURATION_MS = 3000
 const WINDOW_HIGHLIGHT_BORDER = 4
 const CANDIDATE_HIGHLIGHT_PADDING = 20
+const IMAGE_JPEG_QUALITY = 92
 const FOCUS_WINDOW_BORDER = 1
 const FOCUS_WINDOW_LABEL = '当前窗口'
 const FOCUS_WINDOW_POLL_MS = 400
@@ -126,9 +138,48 @@ const PPOCR_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'ppocr')
 const PPOCR_LOCAL_ROOT = path.join(PPOCR_CAPABILITY_ROOT, '.local')
 const PPOCR_PYTHON_PATH = path.join(PPOCR_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
 const PPOCR_SERVER_PATH = path.join(PPOCR_CAPABILITY_ROOT, 'service', 'server.py')
+const OMNIPARSER_DEFAULT_BASE_URL = process.env.OMNIPARSER_BASE_URL || 'http://127.0.0.1:8000'
+const OMNIPARSER_CAPABILITY_ROOT = path.join(__dirname, 'capabilities', 'omniparser')
+const OMNIPARSER_LOCAL_ROOT = path.join(OMNIPARSER_CAPABILITY_ROOT, '.local')
+const OMNIPARSER_PYTHON_PATH = path.join(OMNIPARSER_LOCAL_ROOT, '.venv', 'Scripts', 'python.exe')
+const OMNIPARSER_SERVER_PATH = path.join(OMNIPARSER_CAPABILITY_ROOT, 'service', 'server.py')
 // 1x1 透明像素 PNG，用于 PP-OCR 首次调用预热 lru_cache 里的模型。
 const WARMUP_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='
-const VOICE_OCR_BACKENDS = new Set(['ppocr', 'rapidocr'])
+const VOICE_OCR_BACKENDS = ['ppocr', 'rapidocr', 'omniparser']
+const VOICE_OCR_BACKEND_SET = new Set(VOICE_OCR_BACKENDS)
+const DEFAULT_VOICE_OCR_PROFILE = 'omniparser-gpu'
+// OCR 选择统一收口成 profile，避免 renderer/main/script 三处各自维护 backend/device。
+const VOICE_OCR_PROFILE_TABLE = {
+  'omniparser-gpu': {
+    value: 'omniparser-gpu',
+    backend: 'omniparser',
+    serviceDevice: 'cuda',
+    deviceLabel: 'GPU',
+    label: 'OmniParser - GPU',
+  },
+  'omniparser-cpu': {
+    value: 'omniparser-cpu',
+    backend: 'omniparser',
+    serviceDevice: 'cpu',
+    deviceLabel: 'CPU',
+    label: 'OmniParser - CPU',
+  },
+  'ppocr-gpu': {
+    value: 'ppocr-gpu',
+    backend: 'ppocr',
+    serviceDevice: 'gpu',
+    deviceLabel: 'GPU',
+    label: 'PP-OCR - GPU',
+  },
+  'ppocr-cpu': {
+    value: 'ppocr-cpu',
+    backend: 'ppocr',
+    serviceDevice: 'cpu',
+    deviceLabel: 'CPU',
+    label: 'PP-OCR - CPU',
+  },
+}
+const VOICE_OCR_PROFILE_SET = new Set(Object.keys(VOICE_OCR_PROFILE_TABLE))
 const SPATIAL_MEMORY_SEARCH_PADDING = 80
 
 function buildTimestampToken(date = new Date()) {
@@ -144,16 +195,31 @@ function buildTimestampToken(date = new Date()) {
   ].join('')
 }
 
+function normalizeVoiceOcrProfile(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (VOICE_OCR_PROFILE_SET.has(normalized)) return normalized
+  if (normalized === 'ppocr') return 'ppocr-gpu'
+  if (normalized === 'omniparser') return 'omniparser-gpu'
+  return DEFAULT_VOICE_OCR_PROFILE
+}
+
+function resolveVoiceOcrConfig(value) {
+  return VOICE_OCR_PROFILE_TABLE[normalizeVoiceOcrProfile(value)] || VOICE_OCR_PROFILE_TABLE[DEFAULT_VOICE_OCR_PROFILE]
+}
+
 function normalizeVoiceOcrBackend(value) {
   const normalized = String(value || '').trim().toLowerCase()
-  return VOICE_OCR_BACKENDS.has(normalized) ? normalized : 'ppocr'
+  if (VOICE_OCR_BACKEND_SET.has(normalized)) return normalized
+  return resolveVoiceOcrConfig(value).backend
 }
+
+let currentVoiceOcrProfile = normalizeVoiceOcrProfile(process.env.VOICE_OCR_PROFILE || process.env.VOICE_OCR_BACKEND)
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }
 
-function buildTimestampedPath(sourcePath, suffix, extension = 'png') {
+function buildTimestampedPath(sourcePath, suffix, extension = 'jpg') {
   const parsedPath = path.parse(sourcePath)
   return path.join(parsedPath.dir, `${parsedPath.name}-${suffix}-${buildTimestampToken()}.${extension}`)
 }
@@ -203,7 +269,15 @@ function buildScreenRectFromCandidate(target) {
 
 async function runVoiceOcrWithImage(imagePath, backend, options = {}) {
   const normalizedBackend = normalizeVoiceOcrBackend(backend)
+  const profile = normalizeVoiceOcrProfile(backend)
   const ocrStartAt = Date.now()
+
+  if (normalizedBackend === 'omniparser') {
+    await ensureManagedOmniParserServiceReady({ profile })
+    const result = await testOmniParserWithImage(imagePath, options)
+    console.log(`[${new Date().toISOString()}] [voice] omniparser completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0} elements=${result.elementCount || 0}`)
+    return result
+  }
 
   if (normalizedBackend === 'rapidocr') {
     const result = await testRapidOcrWithImage(imagePath, options)
@@ -211,7 +285,7 @@ async function runVoiceOcrWithImage(imagePath, backend, options = {}) {
     return result
   }
 
-  await ensureManagedPPOcrServiceReady()
+  await ensureManagedPPOcrServiceReady({ profile })
   const result = await testPPOcrWithImage(imagePath, options)
   console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0}`)
   return result
@@ -230,7 +304,8 @@ async function cropImageToFile(sourcePath, cropRect, outputPath) {
   const width = clamp(Math.round(cropRect.width || 0), 1, Math.max(1, size.width - x))
   const height = clamp(Math.round(cropRect.height || 0), 1, Math.max(1, size.height - y))
   const cropped = image.crop({ x, y, width, height })
-  await fsPromises.writeFile(outputPath, cropped.toPNG())
+  // 中间裁剪图也统一写成 JPG，避免 OCR 链路混用多种本地格式。
+  await fsPromises.writeFile(outputPath, cropped.toJPEG(IMAGE_JPEG_QUALITY))
   return { x, y, width, height, imageWidth: size.width, imageHeight: size.height, outputPath }
 }
 
@@ -1157,6 +1232,17 @@ function stopManagedSenseVoiceService() {
   managedSenseVoiceProcess = null
 }
 
+async function waitForProcessExit(processHandle, timeoutMs = 1500) {
+  if (!processHandle || processHandle.killed) return
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs)
+    processHandle.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
 function parsePPOcrBaseUrl() {
   try { return new URL(PPOCR_DEFAULT_BASE_URL) } catch { return new URL('http://127.0.0.1:8020') }
 }
@@ -1172,22 +1258,49 @@ async function isPPOcrReachable(timeoutMs = 1000) {
   } catch { return false }
 }
 
-async function waitForManagedPPOcrReady() {
+async function waitForManagedPPOcrReady(profile = currentVoiceOcrProfile) {
+  const resolved = resolveVoiceOcrConfig(profile)
   for (let index = 0; index < 60; index += 1) {
-    if (await isPPOcrReachable(1000)) {
-      managedPPOcrState = { ...managedPPOcrState, status: 'ready', pid: managedPPOcrProcess?.pid || managedPPOcrState.pid, lastError: '' }
+    try {
+      const probe = await probePPOcr({ timeoutMs: 1000 })
+      managedPPOcrState = {
+        ...managedPPOcrState,
+        status: 'ready',
+        pid: managedPPOcrProcess?.pid || managedPPOcrState.pid,
+        lastError: '',
+        profile: normalizeVoiceOcrProfile(profile),
+        device: probe?.payload?.device || resolved.serviceDevice,
+      }
       return
-    }
+    } catch {}
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
-  managedPPOcrState = { ...managedPPOcrState, status: 'starting', lastError: 'PP-OCR 服务启动中，但探活尚未完成。' }
+  managedPPOcrState = {
+    ...managedPPOcrState,
+    status: 'starting',
+    profile: normalizeVoiceOcrProfile(profile),
+    device: resolved.serviceDevice,
+    lastError: 'PP-OCR 服务启动中，但探活尚未完成。',
+  }
 }
 
-async function startManagedPPOcrService() {
+async function startManagedPPOcrService(options = {}) {
+  const manual = Boolean(options.manual)
+  const profile = normalizeVoiceOcrProfile(options.profile || currentVoiceOcrProfile)
+  const resolved = resolveVoiceOcrConfig(profile)
   const baseUrl = parsePPOcrBaseUrl()
-  managedPPOcrState = { ...managedPPOcrState, autostart: process.env.PPOCR_AUTOSTART !== 'false' }
+  managedPPOcrState = {
+    ...managedPPOcrState,
+    autostart: process.env.PPOCR_AUTOSTART !== 'false',
+    profile,
+    device: resolved.serviceDevice,
+  }
 
-  if (!managedPPOcrState.autostart) {
+  if (resolved.backend !== 'ppocr') {
+    managedPPOcrState = { ...managedPPOcrState, status: 'idle', pid: null, warmed: false }
+    return
+  }
+  if (!manual && !managedPPOcrState.autostart) {
     managedPPOcrState = { ...managedPPOcrState, status: 'disabled', lastError: '' }
     return
   }
@@ -1195,15 +1308,28 @@ async function startManagedPPOcrService() {
     managedPPOcrState = { ...managedPPOcrState, status: 'external', lastError: 'PPOCR_BASE_URL 指向非本机地址，跳过自动启动。' }
     return
   }
-  if (await isPPOcrReachable(800)) {
-    managedPPOcrState = { ...managedPPOcrState, status: 'external', lastError: '' }
-    return
+  if (managedPPOcrProcess && !managedPPOcrProcess.killed) {
+    if (managedPPOcrState.device === resolved.serviceDevice && managedPPOcrState.profile === profile) {
+      return
+    }
+    const previousProcess = managedPPOcrProcess
+    stopManagedPPOcrService()
+    await waitForProcessExit(previousProcess)
   }
+  try {
+    const probe = await probePPOcr({ timeoutMs: 800 })
+    managedPPOcrState = {
+      ...managedPPOcrState,
+      status: 'external',
+      lastError: '',
+      device: probe?.payload?.device || resolved.serviceDevice,
+    }
+    return
+  } catch {}
   if (!fs.existsSync(PPOCR_PYTHON_PATH) || !fs.existsSync(PPOCR_SERVER_PATH)) {
     managedPPOcrState = { ...managedPPOcrState, status: 'missing', lastError: 'PP-OCR 本地部署不存在，请先运行 npm run capability:ppocr:setup。' }
     return
   }
-  if (managedPPOcrProcess && !managedPPOcrProcess.killed) return
 
   fs.mkdirSync(path.join(PPOCR_LOCAL_ROOT, 'cache'), { recursive: true })
   const stdoutLog = fs.createWriteStream(path.join(runtimeLogs, 'ppocr.managed.stdout.log'), { flags: 'a' })
@@ -1215,7 +1341,7 @@ async function startManagedPPOcrService() {
     PPOCR_SERVER_PATH,
     '--host', host,
     '--port', port,
-    '--device', process.env.PPOCR_DEVICE || 'cpu',
+    '--device', resolved.serviceDevice,
   ], {
     cwd: __dirname,
     env: { ...process.env },
@@ -1225,7 +1351,15 @@ async function startManagedPPOcrService() {
 
   managedPPOcrProcess.stdout.pipe(stdoutLog)
   managedPPOcrProcess.stderr.pipe(stderrLog)
-  managedPPOcrState = { ...managedPPOcrState, status: 'starting', pid: managedPPOcrProcess.pid, lastError: '' }
+  managedPPOcrState = {
+    ...managedPPOcrState,
+    status: 'starting',
+    pid: managedPPOcrProcess.pid,
+    lastError: '',
+    profile,
+    device: resolved.serviceDevice,
+    warmed: false,
+  }
 
   managedPPOcrProcess.on('error', (error) => {
     managedPPOcrState = { ...managedPPOcrState, status: 'error', pid: null, lastError: String(error.message || error) }
@@ -1242,18 +1376,20 @@ async function startManagedPPOcrService() {
     managedPPOcrProcess = null
   })
 
-  waitForManagedPPOcrReady()
+  waitForManagedPPOcrReady(profile)
     .then(() => { void warmupPPOcr() })
     .catch((error) => {
       managedPPOcrState = { ...managedPPOcrState, status: 'error', lastError: String(error.message || error) }
     })
 }
 
-async function ensureManagedPPOcrServiceReady() {
-  if (await isPPOcrReachable(1000)) return
-  await startManagedPPOcrService()
+async function ensureManagedPPOcrServiceReady(options = {}) {
+  const profile = normalizeVoiceOcrProfile(options.profile || currentVoiceOcrProfile)
+  const resolved = resolveVoiceOcrConfig(profile)
+  if (await isPPOcrReachable(1000) && managedPPOcrState.profile === profile && managedPPOcrState.device === resolved.serviceDevice) return
+  await startManagedPPOcrService({ ...options, profile })
   if (managedPPOcrState.status === 'starting') {
-    await waitForManagedPPOcrReady()
+    await waitForManagedPPOcrReady(profile)
   }
 }
 
@@ -1281,8 +1417,209 @@ async function warmupPPOcr() {
 function stopManagedPPOcrService() {
   if (managedPPOcrProcess && !managedPPOcrProcess.killed) {
     managedPPOcrProcess.kill()
+    managedPPOcrState = { ...managedPPOcrState, status: 'stopped', pid: null, lastError: '', warmed: false }
   }
   managedPPOcrProcess = null
+}
+
+function parseOmniParserBaseUrl() {
+  try { return new URL(OMNIPARSER_DEFAULT_BASE_URL) } catch { return new URL('http://127.0.0.1:8000') }
+}
+
+function isLocalOmniParserUrl(url) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+}
+
+async function isOmniParserReachable(timeoutMs = 1000) {
+  try {
+    await probeOmniParser({ timeoutMs })
+    return true
+  } catch { return false }
+}
+
+function buildOmniParserEnv() {
+  const cacheRoot = path.join(OMNIPARSER_LOCAL_ROOT, 'cache')
+  const easyOcrRoot = path.join(cacheRoot, 'easyocr')
+  const hfRoot = path.join(cacheRoot, 'hf')
+  const tempRoot = path.join(cacheRoot, 'tmp')
+  return {
+    ...process.env,
+    PIP_CACHE_DIR: path.join(cacheRoot, 'pip'),
+    HF_HOME: hfRoot,
+    HUGGINGFACE_HUB_CACHE: path.join(hfRoot, 'hub'),
+    EASYOCR_MODULE_PATH: easyOcrRoot,
+    TEMP: tempRoot,
+    TMP: tempRoot,
+  }
+}
+
+async function waitForManagedOmniParserReady(profile = currentVoiceOcrProfile) {
+  const resolved = resolveVoiceOcrConfig(profile)
+  for (let index = 0; index < 60; index += 1) {
+    try {
+      const probe = await probeOmniParser({ timeoutMs: 1000 })
+      managedOmniParserState = {
+        ...managedOmniParserState,
+        status: 'ready',
+        pid: managedOmniParserProcess?.pid || managedOmniParserState.pid,
+        lastError: '',
+        profile: normalizeVoiceOcrProfile(profile),
+        device: probe?.payload?.device || resolved.serviceDevice,
+      }
+      return
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  managedOmniParserState = {
+    ...managedOmniParserState,
+    status: 'starting',
+    profile: normalizeVoiceOcrProfile(profile),
+    device: resolved.serviceDevice,
+    lastError: 'OmniParser 服务启动中，但探活尚未完成。',
+  }
+}
+
+// OmniParser 托管启动与 PP-OCR 同级，统一由 Electron 主进程管理生命周期。
+async function startManagedOmniParserService(options = {}) {
+  const manual = Boolean(options.manual)
+  const profile = normalizeVoiceOcrProfile(options.profile || currentVoiceOcrProfile)
+  const resolved = resolveVoiceOcrConfig(profile)
+  const baseUrl = parseOmniParserBaseUrl()
+  managedOmniParserState = {
+    ...managedOmniParserState,
+    autostart: process.env.OMNIPARSER_AUTOSTART === 'true',
+    profile,
+    device: resolved.serviceDevice,
+  }
+
+  if (resolved.backend !== 'omniparser') {
+    managedOmniParserState = { ...managedOmniParserState, status: 'idle', pid: null }
+    return
+  }
+  if (!manual && !managedOmniParserState.autostart) {
+    managedOmniParserState = { ...managedOmniParserState, status: 'disabled', lastError: '' }
+    return
+  }
+  if (!isLocalOmniParserUrl(baseUrl)) {
+    managedOmniParserState = { ...managedOmniParserState, status: 'external', lastError: 'OMNIPARSER_BASE_URL 指向非本机地址，跳过托管启动。' }
+    return
+  }
+  if (managedOmniParserProcess && !managedOmniParserProcess.killed) {
+    if (managedOmniParserState.device === resolved.serviceDevice && managedOmniParserState.profile === profile) {
+      return
+    }
+    const previousProcess = managedOmniParserProcess
+    stopManagedOmniParserService()
+    await waitForProcessExit(previousProcess)
+  }
+  try {
+    const probe = await probeOmniParser({ timeoutMs: 800 })
+    managedOmniParserState = {
+      ...managedOmniParserState,
+      status: 'external',
+      lastError: '',
+      device: probe?.payload?.device || resolved.serviceDevice,
+    }
+    return
+  } catch {}
+  if (!fs.existsSync(OMNIPARSER_PYTHON_PATH) || !fs.existsSync(OMNIPARSER_SERVER_PATH)) {
+    managedOmniParserState = { ...managedOmniParserState, status: 'missing', lastError: 'OmniParser 本地部署不存在，请先运行 npm run capability:omniparser:setup。' }
+    return
+  }
+
+  const cacheRoot = path.join(OMNIPARSER_LOCAL_ROOT, 'cache')
+  fs.mkdirSync(path.join(cacheRoot, 'pip'), { recursive: true })
+  fs.mkdirSync(path.join(cacheRoot, 'hf', 'hub'), { recursive: true })
+  fs.mkdirSync(path.join(cacheRoot, 'easyocr'), { recursive: true })
+  fs.mkdirSync(path.join(cacheRoot, 'tmp'), { recursive: true })
+  const stdoutLog = fs.createWriteStream(path.join(runtimeLogs, 'omniparser.managed.stdout.log'), { flags: 'a' })
+  const stderrLog = fs.createWriteStream(path.join(runtimeLogs, 'omniparser.managed.stderr.log'), { flags: 'a' })
+  const host = baseUrl.hostname === 'localhost' ? '127.0.0.1' : baseUrl.hostname
+  const port = baseUrl.port || '8000'
+
+  managedOmniParserProcess = spawn(OMNIPARSER_PYTHON_PATH, [
+    OMNIPARSER_SERVER_PATH,
+    '--host', host,
+    '--port', port,
+    '--device', resolved.serviceDevice,
+  ], {
+    cwd: __dirname,
+    env: buildOmniParserEnv(),
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  managedOmniParserProcess.stdout.pipe(stdoutLog)
+  managedOmniParserProcess.stderr.pipe(stderrLog)
+  managedOmniParserState = {
+    ...managedOmniParserState,
+    status: 'starting',
+    pid: managedOmniParserProcess.pid,
+    lastError: '',
+    profile,
+    device: resolved.serviceDevice,
+  }
+
+  managedOmniParserProcess.on('error', (error) => {
+    managedOmniParserState = { ...managedOmniParserState, status: 'error', pid: null, lastError: String(error.message || error) }
+  })
+  managedOmniParserProcess.on('exit', (code, signal) => {
+    if (managedOmniParserProcess) {
+      managedOmniParserState = {
+        ...managedOmniParserState,
+        status: code === 0 ? 'stopped' : 'error',
+        pid: null,
+        lastError: code === 0 ? '' : `OmniParser 服务已退出，code=${code}, signal=${signal || ''}`,
+      }
+    }
+    managedOmniParserProcess = null
+  })
+
+  waitForManagedOmniParserReady(profile).catch((error) => {
+    managedOmniParserState = { ...managedOmniParserState, status: 'error', lastError: String(error.message || error) }
+  })
+}
+
+async function ensureManagedOmniParserServiceReady(options = {}) {
+  const profile = normalizeVoiceOcrProfile(options.profile || currentVoiceOcrProfile)
+  const resolved = resolveVoiceOcrConfig(profile)
+  if (await isOmniParserReachable(1000) && managedOmniParserState.profile === profile && managedOmniParserState.device === resolved.serviceDevice) return
+  await startManagedOmniParserService({ ...options, manual: true, profile })
+  if (managedOmniParserState.status === 'starting') {
+    await waitForManagedOmniParserReady(profile)
+  }
+}
+
+function stopManagedOmniParserService() {
+  if (managedOmniParserProcess && !managedOmniParserProcess.killed) {
+    managedOmniParserProcess.kill()
+    managedOmniParserState = { ...managedOmniParserState, status: 'stopped', pid: null, lastError: '' }
+  }
+  managedOmniParserProcess = null
+}
+
+// 根据当前所选 OCR profile 切换托管服务；同后端切 device 时也会重启对应进程。
+async function applySelectedOcrService(selection) {
+  const profile = normalizeVoiceOcrProfile(selection)
+  const selected = resolveVoiceOcrConfig(profile)
+  currentVoiceOcrProfile = profile
+  if (selected.backend === 'omniparser') {
+    stopManagedPPOcrService()
+    await startManagedOmniParserService({ manual: true, profile })
+  } else if (selected.backend === 'ppocr') {
+    stopManagedOmniParserService()
+    await startManagedPPOcrService({ manual: true, profile })
+  } else {
+    stopManagedOmniParserService()
+    stopManagedPPOcrService()
+  }
+
+  return {
+    profile,
+    backend: selected.backend,
+    omniparser: managedOmniParserState,
+    ppocr: managedPPOcrState,
+  }
 }
 
 async function executeBridgePlan(plan) {
@@ -1342,7 +1679,7 @@ async function capturePrimaryDesktopForOmniParser(payload = {}) {
 async function captureWindowImage(handle) {
   const detail = await windowRegistry.getWindowDetail(handle)
   const target = detail.item
-  const fileName = `window-${target.shortId.toLowerCase()}-${buildTimestampToken()}.png`
+  const fileName = `window-${target.shortId.toLowerCase()}-${buildTimestampToken()}.jpg`
   const outputPath = path.join(runtimeScreenshots, fileName)
   const result = await windowRegistry.captureWindow(target.handle, outputPath)
 
@@ -1365,8 +1702,13 @@ async function saveAnnotatedImageFromDataUrl(imageDataUrl, sourceImagePath, suff
   }
 
   const parsedPath = path.parse(sourceImagePath)
-  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}-${suffix}.png`)
-  await fsPromises.writeFile(outputPath, Buffer.from(base64Payload, 'base64'))
+  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}-${suffix}.jpg`)
+  // 服务端返回的标注图可能是 PNG，这里统一转成 JPG 落盘，保持本地产物一致。
+  const image = nativeImage.createFromDataURL(imageDataUrl)
+  if (image.isEmpty()) {
+    throw new Error('视觉能力标注图解码失败，无法保存到本地。')
+  }
+  await fsPromises.writeFile(outputPath, image.toJPEG(IMAGE_JPEG_QUALITY))
   return outputPath
 }
 
@@ -1596,9 +1938,6 @@ app.whenReady().then(async () => {
       lastError: String(error.message || error),
     }
   })
-  startManagedPPOcrService().catch((error) => {
-    managedPPOcrState = { ...managedPPOcrState, status: 'error', lastError: String(error.message || error) }
-  })
   voiceRouter = createVoiceActionRouter({
     captureAndOcr: captureAndOcrPrimaryDisplay,
     captureAndOcrFocusedWindow,
@@ -1656,13 +1995,17 @@ app.whenReady().then(async () => {
       providers: listProviderStatuses(),
       omniparser: {
         baseURL: process.env.OMNIPARSER_BASE_URL || 'http://127.0.0.1:8000',
+        managed: managedOmniParserState,
       },
       ppocr: {
         baseURL: process.env.PPOCR_BASE_URL || 'http://127.0.0.1:8020',
+        managed: managedPPOcrState,
       },
       voiceOcr: {
-        backend: normalizeVoiceOcrBackend(process.env.VOICE_OCR_BACKEND),
-        supported: [...VOICE_OCR_BACKENDS],
+        profile: currentVoiceOcrProfile,
+        backend: normalizeVoiceOcrBackend(currentVoiceOcrProfile),
+        supported: Object.keys(VOICE_OCR_PROFILE_TABLE),
+        options: Object.values(VOICE_OCR_PROFILE_TABLE),
       },
       sensevoice: {
         baseURL: process.env.SENSEVOICE_BASE_URL || 'http://127.0.0.1:8010',
@@ -1716,7 +2059,7 @@ app.whenReady().then(async () => {
     dictationSession = new MainDictationSession({
       sessionId,
       language: payload.language,
-      ocrBackend: normalizeVoiceOcrBackend(payload.ocrBackend),
+      ocrBackend: normalizeVoiceOcrProfile(payload.ocrBackend),
       spatialMemoryEnabled: Boolean(payload.spatialMemoryEnabled),
       logger: (message) => logVoiceMessage(message),
       emitEvent: (eventPayload) => pushDictationEvent(eventPayload),
@@ -1772,7 +2115,15 @@ app.whenReady().then(async () => {
     return probeSenseVoice(payload)
   })
 
+  ipcMain.handle('bridge:apply-ocr-service', async (_event, payload = {}) => {
+    return applySelectedOcrService(payload.profile || payload.backend)
+  })
+
   ipcMain.handle('bridge:test-omniparser', async (_event, payload = {}) => {
+    const profile = normalizeVoiceOcrBackend(currentVoiceOcrProfile) === 'omniparser'
+      ? currentVoiceOcrProfile
+      : 'omniparser-gpu'
+    await ensureManagedOmniParserServiceReady({ profile })
     const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
     const parseResult = await testOmniParserWithImage(targetDisplay.savedPath, payload)
     const annotatedImagePath = await saveAnnotatedImageFromDataUrl(
@@ -1796,6 +2147,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('bridge:test-ppocr', async (_event, payload = {}) => {
     // PP-OCR 测试也固定抓取主屏，确保与 OmniParser 的对比基线一致。
     // 当前不再让服务回传标注图，只消费结构化 OCR 行。
+    const profile = normalizeVoiceOcrBackend(currentVoiceOcrProfile) === 'ppocr'
+      ? currentVoiceOcrProfile
+      : 'ppocr-gpu'
+    await ensureManagedPPOcrServiceReady({ profile })
     const { captureResult, targetDisplay } = await capturePrimaryDesktopForOmniParser(payload)
     const parseResult = await testPPOcrWithImage(targetDisplay.savedPath, payload)
 
@@ -1977,5 +2332,6 @@ app.on('will-quit', () => {
   void stopDictationSession('app-quit')
   stopManagedSenseVoiceService()
   stopManagedPPOcrService()
+  stopManagedOmniParserService()
   shortcutManager.stop()
 })

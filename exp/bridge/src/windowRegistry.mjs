@@ -255,6 +255,22 @@ if (-not [BridgeWindowApi]::IsWindow($hWnd)) { throw "Window not found" }
 if ([BridgeWindowApi]::IsIconic($hWnd)) { throw "Window is minimized" }
 ${buildEnableDpiAwarenessScript()}
 
+function Save-BitmapAsJpeg($bitmap, $outputPath, $quality) {
+  $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+  if ($null -eq $encoder) {
+    $bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    return
+  }
+
+  $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters 1
+  $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]$quality)
+  try {
+    $bitmap.Save($outputPath, $encoder, $encoderParams)
+  } finally {
+    $encoderParams.Dispose()
+  }
+}
+
 $rect = New-Object RECT
 [BridgeWindowApi]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
 $width = [Math]::Max(1, $rect.Right - $rect.Left)
@@ -304,7 +320,8 @@ if (-not $printSucceeded) {
 }
 
 $outputPath = '${safeOutputPath}'
-$bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+# 窗口截图统一改成高质量 JPG，减少磁盘体积并和桌面截图保持一致。
+Save-BitmapAsJpeg $bitmap $outputPath 92
 $bitmap.Dispose()
 
 [PSCustomObject]@{

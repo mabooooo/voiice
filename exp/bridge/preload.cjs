@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('bridgeApi', {
   probeOmniParser: (payload) => ipcRenderer.invoke('bridge:probe-omniparser', payload),
   probePPOcr: (payload) => ipcRenderer.invoke('bridge:probe-ppocr', payload),
   probeSenseVoice: (payload) => ipcRenderer.invoke('bridge:probe-sensevoice', payload),
+  applyOcrService: (payload) => ipcRenderer.invoke('bridge:apply-ocr-service', payload),
   testOmniParser: (payload) => ipcRenderer.invoke('bridge:test-omniparser', payload),
   testPPOcr: (payload) => ipcRenderer.invoke('bridge:test-ppocr', payload),
   showCornerIndicators: () => ipcRenderer.invoke('bridge:show-corner-indicators'),

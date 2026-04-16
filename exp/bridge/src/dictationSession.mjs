@@ -18,7 +18,7 @@ export class MainDictationSession {
   constructor({
     sessionId,
     language = 'auto',
-    ocrBackend = 'ppocr',
+    ocrBackend = 'omniparser',
     spatialMemoryEnabled = false,
     logger = () => {},
     emitEvent = () => {},

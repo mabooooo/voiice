@@ -82,7 +82,7 @@ function buildPreviewDataUrl(image) {
 }
 
 function buildCaptureFileName({ compressed, index, timestamp }) {
-  return `desktop-${compressed ? '720p' : 'full'}-d${index + 1}-${timestamp}.${compressed ? 'jpg' : 'png'}`
+  return `desktop-${compressed ? '720p' : 'full'}-d${index + 1}-${timestamp}.jpg`
 }
 
 function buildFinalImage(snapshot, options) {
@@ -115,7 +115,7 @@ export async function captureDesktopScreenshots(options = {}) {
     outputDir,
     compressed = false,
     maxHeight = 720,
-    jpegQuality = 82,
+    jpegQuality = compressed ? 82 : 92,
   } = options
 
   if (!outputDir) {
@@ -130,7 +130,8 @@ export async function captureDesktopScreenshots(options = {}) {
 
   for (const snapshot of snapshots) {
     const finalImage = buildFinalImage(snapshot, { compressed, maxHeight })
-    const buffer = compressed ? finalImage.toJPEG(jpegQuality) : finalImage.toPNG()
+    // 桌面截图统一改成 JPG 落盘，减少 4K/多屏场景下的编码与磁盘压力。
+    const buffer = finalImage.toJPEG(jpegQuality)
     const savedPath = path.join(outputDir, buildCaptureFileName({
       compressed,
       index: snapshot.index,
@@ -145,7 +146,7 @@ export async function captureDesktopScreenshots(options = {}) {
     ok: true,
     compressed,
     outputDir,
-    format: compressed ? 'JPG' : 'PNG',
+    format: 'JPG',
     displayCount: items.length,
     totalBytes: items.reduce((sum, item) => sum + item.byteLength, 0),
     createdAt: new Date().toLocaleString('zh-CN', { hour12: false }),

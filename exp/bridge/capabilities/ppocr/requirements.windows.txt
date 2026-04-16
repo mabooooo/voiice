@@ -1,7 +1,6 @@
 fastapi==0.116.1
 numpy<2
 packaging<26
-paddlepaddle==3.0.0
 paddlex==3.0.3
 paddleocr==3.0.3
 Pillow==11.3.0

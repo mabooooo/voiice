@@ -42,6 +42,13 @@ export function extractTrigger(text) {
   }
 }
 
+// OmniParser 当前只走“当前窗口截图”，其余后端继续按动词策略决定截图范围。
+function resolveCaptureScope(trigger, backend) {
+  return String(backend || '').toLowerCase() === 'omniparser'
+    ? 'focused-window'
+    : (trigger?.scope || 'full-screen')
+}
+
 export function extractSelectionIndex(text) {
   if (!text) return null
   const normalized = String(text).trim()
@@ -237,12 +244,15 @@ export function createVoiceActionRouter(deps) {
       return { handled: false, reason: 'no-trigger' }
     }
     
+    const backend = String(options.backend || 'omniparser').toLowerCase()
+    const captureScope = resolveCaptureScope(trig, backend)
+
     log(`[voice] trigger "${trig.keyword}" → OCR...`)
-    log(`[voice] route options: backend=${options.backend || 'ppocr'} spatialMemory=${options.spatialMemoryEnabled ? 'on' : 'off'}`)
+    log(`[voice] route options: backend=${backend} spatialMemory=${options.spatialMemoryEnabled ? 'on' : 'off'} scope=${captureScope}`)
     deps.notifyOverlay?.({
       status: 'waiting',
       title: `定位“${trig.keyword}”`,
-      subtitle: trig.scope === 'focused-window' ? '识别当前窗口中...' : '识别屏幕中...',
+      subtitle: captureScope === 'focused-window' ? '识别当前窗口中...' : '识别屏幕中...',
     })
 
     if (options.spatialMemoryEnabled) {
@@ -266,8 +276,8 @@ export function createVoiceActionRouter(deps) {
 
     let ocr
     try {
-      // “打开”默认只 OCR 当前焦点窗口；“点击”仍走整屏 OCR。
-      ocr = trig.scope === 'focused-window'
+      // OmniParser 目前统一走当前窗口截图；其余后端保持原有窗口/整屏分流。
+      ocr = captureScope === 'focused-window'
         ? await deps.captureAndOcrFocusedWindow?.({ backend: options.backend })
         : await deps.captureAndOcr({ backend: options.backend })
     } catch (error) {
@@ -279,7 +289,7 @@ export function createVoiceActionRouter(deps) {
     const picks = pickCandidates(ocr.ocrLines, trig.keyword, MAX_CANDIDATES)
     if (picks.length === 0) {
       log(`[voice] no candidate for "${trig.keyword}" in ${ocr.ocrLines?.length || 0} lines`)
-      deps.notifyOverlay?.({ status: 'executing', title: '未命中', subtitle: `屏幕上找不到“${trig.keyword}”`, autoResetMs: 3500 })
+      deps.notifyOverlay?.({ status: 'executing', title: '未命中', subtitle: `${captureScope === 'focused-window' ? '当前窗口' : '屏幕'}上找不到“${trig.keyword}”`, autoResetMs: 3500 })
       reset('no-candidate')
       return { handled: true, action: 'no-candidate', keyword: trig.keyword }
     }

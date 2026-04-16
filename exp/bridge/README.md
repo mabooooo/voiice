@@ -78,7 +78,7 @@ OMNIPARSER_BASE_URL=http://127.0.0.1:8000
 PPOCR_BASE_URL=http://127.0.0.1:8020
 SENSEVOICE_BASE_URL=http://127.0.0.1:8010
 SENSEVOICE_AUTOSTART=true
-SENSEVOICE_DEVICE=cpu
+SENSEVOICE_DEVICE=cpu || cuda
 ```
 
 如果切到 `Xiaomi MiMo` provider，请求 body 里需要额外带上：

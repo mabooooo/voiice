@@ -1,5 +1,7 @@
 param(
   [string]$PythonExe = "python",
+  [string]$Device = "cuda",
+  [string]$TorchChannel = "cu124",
   [string]$WeightRepo = "microsoft/OmniParser-v2.0",
   [string]$WeightSubdir = "icon_detect"
 )
@@ -55,8 +57,14 @@ else {
 Write-Step "Upgrade pip toolchain"
 & $PythonPath -m pip install --upgrade pip setuptools wheel
 
-Write-Step "Install PyTorch CUDA wheels"
-& $PipPath install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+$NormalizedDevice = $Device.Trim().ToLower()
+Write-Step "Install PyTorch runtime"
+if ($NormalizedDevice -eq "cpu") {
+  & $PipPath install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+}
+else {
+  & $PipPath install torch torchvision --index-url "https://download.pytorch.org/whl/$TorchChannel"
+}
 
 Write-Step "Install detect-only runtime dependencies"
 & $PipPath install -r $RequirementsPath
@@ -71,6 +79,7 @@ else {
 
 Write-Step "Detect-only OmniParser setup complete"
 Write-Host "Python: $PythonPath"
+Write-Host "Device: $NormalizedDevice"
 Write-Host "Model: $WeightModelPath"
 Write-Host "Cache: $CacheRoot"
 Write-Host "Start script: $(Join-Path $CapabilityRoot 'start.ps1')"

@@ -1,7 +1,7 @@
 param(
   [string]$BindHost = "127.0.0.1",
   [int]$Port = 8020,
-  [string]$Device = "cpu"
+  [string]$Device = "gpu"
 )
 
 $ErrorActionPreference = "Stop"

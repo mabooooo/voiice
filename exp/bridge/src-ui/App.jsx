@@ -29,6 +29,14 @@ const PROVIDER_OPTIONS = [
   { value: 'qwen', label: 'Qwen' },
   { value: 'xiaomi', label: 'Xiaomi MiMo' },
 ]
+const DEFAULT_VOICE_OCR_PROFILE = 'omniparser-gpu'
+const VOICE_OCR_OPTIONS = [
+  { value: 'omniparser-gpu', backend: 'omniparser', label: 'OmniParser - GPU', hint: '当前默认。窗口截图 + EasyOCR/icon_detect，优先走 GPU。' },
+  { value: 'omniparser-cpu', backend: 'omniparser', label: 'OmniParser - CPU', hint: '与 GPU 同链路，适合无 CUDA 环境排障。' },
+  { value: 'ppocr-gpu', backend: 'ppocr', label: 'PP-OCR - GPU', hint: 'Paddle OCR 走 GPU，适合已有 CUDA 11.8/12.3 的机器。' },
+  { value: 'ppocr-cpu', backend: 'ppocr', label: 'PP-OCR - CPU', hint: '兼容性优先，性能最稳但速度较慢。' },
+]
+const VOICE_OCR_OPTION_MAP = Object.fromEntries(VOICE_OCR_OPTIONS.map((item) => [item.value, item]))
 // 首选语言：默认 auto 让 SenseVoice 自己 LID，
 // 固定到单语言（zh/en/...）在纯单语场景下能多拿 1~3% 的精度，但会降低中英混说的鲁棒性。
 const PREFERRED_LANGUAGE_OPTIONS = [
@@ -67,6 +75,16 @@ const PRIVILEGED_ACTIONS = [
 ]
 
 function formatJson(value) { return JSON.stringify(value, null, 2) }
+function normalizeVoiceOcrSelection(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (VOICE_OCR_OPTION_MAP[normalized]) return normalized
+  if (normalized === 'omniparser') return 'omniparser-gpu'
+  if (normalized === 'ppocr') return 'ppocr-gpu'
+  return DEFAULT_VOICE_OCR_PROFILE
+}
+function getVoiceOcrOption(value) {
+  return VOICE_OCR_OPTION_MAP[normalizeVoiceOcrSelection(value)] || VOICE_OCR_OPTION_MAP[DEFAULT_VOICE_OCR_PROFILE]
+}
 function formatLatencyMs(value) {
   if (!Number.isFinite(value)) return '-'
   return `${Math.round(value)} ms`
@@ -195,7 +213,7 @@ export function App() {
   const [audioPath, setAudioPath] = useState('')
   const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(STORAGE_KEYS.provider) || 'qwen')
   const [senseVoiceEnabled, setSenseVoiceEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.senseVoiceEnabled) === 'true')
-  const [voiceOcrBackend, setVoiceOcrBackend] = useState(() => localStorage.getItem(STORAGE_KEYS.voiceOcrBackend) || 'ppocr')
+  const [voiceOcrBackend, setVoiceOcrBackend] = useState(() => normalizeVoiceOcrSelection(localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)))
   const [spatialMemoryEnabled, setSpatialMemoryEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.spatialMemoryEnabled) !== 'false')
   // 连续听写开关：关闭时保持原始"按键开始→按键结束→整段上传"链路；打开后快捷键切换常驻听写。
   const [dictationEnabled, setDictationEnabled] = useState(() => localStorage.getItem(STORAGE_KEYS.dictationEnabled) === 'true')
@@ -208,6 +226,7 @@ export function App() {
   const [timing, setTiming] = useState({})
   const [usage, setUsage] = useState({})
   const [senseVoiceBusy, setSenseVoiceBusy] = useState(false)
+  const [ocrServiceBusy, setOcrServiceBusy] = useState(false)
   const [senseVoiceProbe, setSenseVoiceProbe] = useState({
     ready: false,
     message: '尚未检测',
@@ -242,7 +261,7 @@ export function App() {
   const recorderRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const autoAnalyzeAfterStopRef = useRef(false)
-  const voiceOcrBackendRef = useRef(localStorage.getItem(STORAGE_KEYS.voiceOcrBackend) || 'ppocr')
+  const voiceOcrBackendRef = useRef(normalizeVoiceOcrSelection(localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)))
   const spatialMemoryEnabledRef = useRef(localStorage.getItem(STORAGE_KEYS.spatialMemoryEnabled) !== 'false')
   // dictation 相关 ref，避免快捷键回调里拿到过期 state。
   const dictationEnabledRef = useRef(localStorage.getItem(STORAGE_KEYS.dictationEnabled) === 'true')
@@ -376,6 +395,21 @@ export function App() {
     return availableMicrophonesRef.current.find(item => item.deviceId === deviceId)?.label || '已选设备'
   }
 
+  // 运行时配置里包含主进程托管服务状态，切换 OCR 后端后需要主动刷新一次。
+  async function refreshRuntimeConfig() {
+    const status = await window.bridgeApi.getConfigStatus()
+    setRuntimeConfig(status)
+    setConfigStatus(formatJson(status))
+    if (!localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)) {
+      setVoiceOcrBackend(normalizeVoiceOcrSelection(status.voiceOcr?.profile))
+    }
+    if (status.shortcut) {
+      setShortcutState(status.shortcut)
+      if (status.shortcut.shortcut) setShortcutDraft(status.shortcut.shortcut)
+    }
+    return status
+  }
+
   // 刷新输入设备时优先保留显式选择，避免录音过程中切回别的麦克风。
   async function refreshMicrophoneDevices(preferredDeviceId) {
     try {
@@ -400,17 +434,7 @@ export function App() {
   }
 
   useEffect(() => {
-    window.bridgeApi.getConfigStatus().then((status) => {
-      setRuntimeConfig(status)
-      setConfigStatus(formatJson(status))
-      if (!localStorage.getItem(STORAGE_KEYS.voiceOcrBackend)) {
-        setVoiceOcrBackend(status.voiceOcr?.backend || 'ppocr')
-      }
-      if (status.shortcut) {
-        setShortcutState(status.shortcut)
-        if (status.shortcut.shortcut) setShortcutDraft(status.shortcut.shortcut)
-      }
-    }).catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
+    refreshRuntimeConfig().catch((error) => setConfigStatus(`读取失败: ${error.message || error}`))
 
     window.bridgeApi.getShortcutState().then((state) => {
       setShortcutState(state)
@@ -528,6 +552,22 @@ export function App() {
         baseURL: runtimeConfig?.sensevoice?.baseURL || '',
         device: '',
       })
+    }
+  }
+
+  // OCR 服务切换统一按 profile 生效，设置页、连续听写和开发者测试共用一份选择。
+  async function applyCurrentOcrService() {
+    try {
+      setOcrServiceBusy(true)
+      const profile = normalizeVoiceOcrSelection(voiceOcrBackendRef.current)
+      const option = getVoiceOcrOption(profile)
+      const result = await window.bridgeApi.applyOcrService({ profile })
+      await refreshRuntimeConfig()
+      appendLog(`已应用 OCR 服务：${option.label}。PP-OCR=${result.ppocr?.status || 'unknown'}(${result.ppocr?.device || '-'})，OmniParser=${result.omniparser?.status || 'unknown'}(${result.omniparser?.device || '-'})。`)
+    } catch (error) {
+      appendLog(`切换 OCR 服务失败: ${error.message || error}`)
+    } finally {
+      setOcrServiceBusy(false)
     }
   }
 
@@ -1229,32 +1269,40 @@ export function App() {
         <Card>
           <CardHeader>
             <div><div className="section-label">Local OCR</div><CardTitle>语音点选 OCR 后端</CardTitle></div>
-            <CardDescription>右 Alt 语音点选链路可在 RapidOCR 和 PP-OCR 之间切换，手动 PP-OCR 面板不受这里影响。</CardDescription>
+            <CardDescription>右 Alt 语音点选链路统一改为“后端 + 设备”四档；默认走 OmniParser GPU，且 OmniParser 当前固定走当前窗口截图。</CardDescription>
           </CardHeader>
           <CardContent className="stack">
             <div className="settings-card">
               <div className="settings-card__row">
                 <div className="settings-status">
-                  <span className={`settings-status__dot ${voiceOcrBackend === 'rapidocr' ? 'settings-status__dot--ok' : ''}`} />
-                  <span>{voiceOcrBackend === 'rapidocr' ? '当前使用 RapidOCR' : '当前使用 PP-OCR'}</span>
+                  <span className="settings-status__dot settings-status__dot--ok" />
+                  <span>当前使用 {getVoiceOcrOption(voiceOcrBackend).label}</span>
                 </div>
-                <button
-                  type="button"
-                  className={`ui-switch ${voiceOcrBackend === 'rapidocr' ? 'ui-switch--checked' : ''}`}
-                  aria-pressed={voiceOcrBackend === 'rapidocr'}
-                  onClick={() => setVoiceOcrBackend((current) => current === 'rapidocr' ? 'ppocr' : 'rapidocr')}
-                >
-                  <span className="ui-switch__thumb" />
-                </button>
-              </div>
-              <div className="helper-text">开关状态：{voiceOcrBackend === 'rapidocr' ? 'RapidOCR detect + recognize' : 'PP-OCR 本地服务'}</div>
-              <div className="helper-text">
-                支持后端：{Array.isArray(runtimeConfig?.voiceOcr?.supported) ? runtimeConfig.voiceOcr.supported.join(' / ') : 'ppocr / rapidocr'}
+                <select className="ui-select" value={voiceOcrBackend} onChange={(event) => setVoiceOcrBackend(event.target.value)}>
+                  {VOICE_OCR_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
               </div>
               <div className="helper-text">
-                当前默认后端：{runtimeConfig?.voiceOcr?.backend || 'ppocr'}
+                当前说明：{getVoiceOcrOption(voiceOcrBackend).hint}
               </div>
-              <div className="helper-text">RapidOCR 复用 `capabilities/ppocr/.local/.venv` 内的本地模型依赖，不额外新增一套部署。</div>
+              <div className="helper-text">
+                支持选项：{Array.isArray(runtimeConfig?.voiceOcr?.options) ? runtimeConfig.voiceOcr.options.map((item) => item.label).join(' / ') : VOICE_OCR_OPTIONS.map((item) => item.label).join(' / ')}
+              </div>
+              <div className="helper-text">
+                主进程当前 profile：{runtimeConfig?.voiceOcr?.profile || DEFAULT_VOICE_OCR_PROFILE}
+              </div>
+              <div className="helper-text">PP-OCR 服务：{runtimeConfig?.ppocr?.managed?.status || 'idle'} · device={runtimeConfig?.ppocr?.managed?.device || '-'}{runtimeConfig?.ppocr?.managed?.lastError ? ` · ${runtimeConfig.ppocr.managed.lastError}` : ''}</div>
+              <div className="helper-text">OmniParser 服务：{runtimeConfig?.omniparser?.managed?.status || 'idle'} · device={runtimeConfig?.omniparser?.managed?.device || '-'}{runtimeConfig?.omniparser?.managed?.lastError ? ` · ${runtimeConfig.omniparser.managed.lastError}` : ''}</div>
+              <div className="row">
+                <Button variant="secondary" onClick={applyCurrentOcrService} disabled={ocrServiceBusy}>
+                  {`启动 ${getVoiceOcrOption(voiceOcrBackend).label} 服务`}
+                </Button>
+                <Button variant="secondary" onClick={() => refreshRuntimeConfig().catch((error) => appendLog(`刷新 OCR 状态失败: ${error.message || error}`))} disabled={ocrServiceBusy}>
+                  刷新 OCR 状态
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>

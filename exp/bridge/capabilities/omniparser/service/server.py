@@ -33,7 +33,13 @@ def parse_args():
     return parser.parse_args()
 
 
+def normalize_device(device):
+    normalized = str(device or "cpu").strip().lower()
+    return "cuda" if normalized in ("gpu", "cuda", "cuda:0", "0") else "cpu"
+
+
 ARGS = parse_args()
+ARGS.device = normalize_device(ARGS.device)
 MODEL_PATH = WEIGHTS_ROOT / ARGS.model_subdir / "model.pt"
 
 
@@ -87,7 +93,7 @@ def get_ocr_reader():
     # OCR 只保留 EasyOCR，减少额外重量级依赖。
     return easyocr.Reader(
         ["en"],
-        gpu=False,
+        gpu=ARGS.device == "cuda",
         model_storage_directory=str(EASYOCR_CACHE_ROOT),
         user_network_directory=str(EASYOCR_CACHE_ROOT),
     )
@@ -116,6 +122,7 @@ def detect_icon_items(image: Image.Image):
         source=image,
         conf=ARGS.box_threshold,
         imgsz=ARGS.imgsz,
+        device="0" if ARGS.device == "cuda" else "cpu",
         verbose=False,
     )[0]
     boxes = prediction.boxes.xyxy.tolist() if prediction.boxes is not None else []

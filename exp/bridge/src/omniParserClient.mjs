@@ -7,6 +7,22 @@ function normalizeBaseUrl(baseURL) {
   return String(baseURL || DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
 
+// OmniParser 返回的是“文本项 + 图标项”混合结构，这里压成语音路由可直接复用的 ocrLines。
+function normalizeParsedItemToOcrLine(item) {
+  const bbox = Array.isArray(item?.bbox) && item.bbox.length === 4
+    ? item.bbox.map(value => Math.round(Number(value) || 0))
+    : null
+  if (!bbox) return null
+
+  if (item?.type === 'text') {
+    const text = String(item?.text || '').trim()
+    return text ? { text, bbox, confidence: Number(item?.confidence) || 0, source: 'omniparser-text' } : null
+  }
+
+  const text = String(item?.content || '').trim()
+  return text ? { text, bbox, confidence: Number(item?.confidence) || 0, source: 'omniparser-icon' } : null
+}
+
 // 统一封装本地 OmniParser 服务请求，避免主进程到处散落 fetch 细节。
 async function requestOmniParser(pathname, options = {}) {
   const baseURL = normalizeBaseUrl(options.baseURL)
@@ -52,14 +68,21 @@ export async function testOmniParserWithImage(imagePath, options = {}) {
     }),
   })
 
+  const parsedContentList = payload.parsed_content_list || []
+  const ocrLines = parsedContentList
+    .map(normalizeParsedItemToOcrLine)
+    .filter(Boolean)
+
   return {
     ok: true,
     baseURL,
     imagePath,
     localLatencyMs: Date.now() - startedAt,
     serviceLatencySeconds: payload.latency ?? null,
-    elementCount: payload.element_count ?? (Array.isArray(payload.parsed_content_list) ? payload.parsed_content_list.length : 0),
-    parsedContentList: payload.parsed_content_list || [],
+    elementCount: payload.element_count ?? (Array.isArray(parsedContentList) ? parsedContentList.length : 0),
+    parsedContentList,
+    lineCount: ocrLines.length,
+    ocrLines,
     somImageDataUrl: payload.som_image_base64
       ? `data:image/png;base64,${payload.som_image_base64}`
       : '',

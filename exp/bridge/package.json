@@ -15,7 +15,6 @@
     "capability:ppocr:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/ppocr/start.ps1",
     "capability:sensevoice:setup": "powershell -ExecutionPolicy Bypass -File ./capabilities/sensevoice/setup.ps1",
     "capability:sensevoice:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/sensevoice/start.ps1",
-    "vendor:silero": "node ./scripts/download-silero-vad.mjs",
     "smoke:matcher": "node ./scripts/smoke-matcher.mjs",
     "smoke:screenshot": "electron ./scripts/smoke-screenshot.mjs"
   },
@@ -23,7 +22,6 @@
     "dotenv": "^17.4.2",
     "electron": "^41.2.0",
     "ffmpeg-static": "^5.3.0",
-    "onnxruntime-web": "^1.20.1",
     "openai": "^6.34.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

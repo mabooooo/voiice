@@ -15,6 +15,12 @@
 - [docs/voice-dictation.md](D:/Projects/AI/voiice/exp/bridge/docs/voice-dictation.md) 更新为当前主进程连续听写架构，补充了新边界、参数和排查方式。
 - overlay 日志现在只在 `status / title / subtitle` 发生实际变化时打印，不再因电平刷新而在终端重复刷屏。
 
+### Removed
+
+- 删除旧的 renderer 内连续听写实现：`audioPipeline / silero / fsm / ringBuffer / assetUrl / wavEncoder`。
+- 删除不再需要的 `public/vad-worklet.js`、`public/silero_vad.onnx`、`public/ort/` 以及 `vendor:silero` 脚本。
+- 移除 `onnxruntime-web` 依赖，避免继续为已下线的旧链路安装和分发 ORT 资源。
+
 ### Fixed
 
 - 修复连续听写在 renderer 中能采到麦克风、但无法稳定进入 ASR 的问题，现改为由主进程统一完成断句和单句提交。
@@ -24,10 +30,10 @@
 
 ### Added
 
-- 新增 renderer 侧连续听写管线 [src-ui/lib/dictation/](D:/Projects/AI/voiice/exp/bridge/src-ui/lib/dictation/)，由 `audioPipeline → silero (VAD) → fsm → wavEncoder` 组成一条纯本地的"VAD 端点检测 + 自动断句"链路。
-- 新增 [public/vad-worklet.js](D:/Projects/AI/voiice/exp/bridge/public/vad-worklet.js)：AudioWorklet 把 128 采样 quantum 聚合成 `512 采样 / 32ms` 帧，推送给主线程做 VAD 推理。
+- 新增 renderer 侧连续听写管线 `src-ui/lib/dictation/`，由 `audioPipeline → silero (VAD) → fsm → wavEncoder` 组成一条纯本地的"VAD 端点检测 + 自动断句"链路。
+- 新增 `public/vad-worklet.js`：AudioWorklet 把 128 采样 quantum 聚合成 `512 采样 / 32ms` 帧，推送给主线程做 VAD 推理。
 - 新增 Silero VAD 离线资产：`npm run vendor:silero` 会下载 `silero_vad.onnx` 并把 `onnxruntime-web` 的 `.wasm / .mjs` 同步到 `public/ort/`。
-- 新增薄 FSM：`idle → pre → in → post → idle`，参数见 [fsm.js](D:/Projects/AI/voiice/exp/bridge/src-ui/lib/dictation/fsm.js) `DEFAULT_CONFIG`；起点敏捷（`vadEnter=0.45`、`preSpeechMs=96`），终点保守（`endSilenceMs=700`、`preRollMs=400`、`maxUtteranceMs=15s`）。
+- 新增薄 FSM：`idle → pre → in → post → idle`，参数见 `fsm.js` 的 `DEFAULT_CONFIG`；起点敏捷（`vadEnter=0.45`、`preSpeechMs=96`），终点保守（`endSilenceMs=700`、`preRollMs=400`、`maxUtteranceMs=15s`）。
 - 新增双缓冲：`RingBuffer` 保存最近 `400ms` 原始音频用于 pre-roll；`utteranceBuffer` 在 `in/post` 阶段累积当前句，封包时按最后一次 speech 帧截断尾部静音。
 - 新增短句二重门控：`<180ms` 直接丢弃；`180~320ms` 需满足 `VAD 峰值 ≥ 0.70 且 RMS > 噪声基线 × 1.8` 才保留，用于稳定留下"对 / 不对 / 好 / 可以 / 嗯 / 同意"这类极短指令，同时滤掉咳嗽、键盘噼啪。
 - 新增首选语言设置（`auto / zh / en / ja / ko / yue`），持久化到 `localStorage`，每句识别请求都带上。

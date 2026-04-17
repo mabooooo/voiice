@@ -13,3 +13,4 @@
 - `omniparser`：本地桌面截图解析能力，供开发者模式测试。
 - `ppocr`：本地 PP-OCRv5 mobile 截图文字识别能力，供开发者模式快速测试。
 - `sensevoice`：本地语音识别能力，供设置页开启并行转写。
+- `vocaela`：本地 Vocaela-2-500M-1024R2 视觉语言 GUI agent，截图 + 指令输出带坐标的结构化动作。

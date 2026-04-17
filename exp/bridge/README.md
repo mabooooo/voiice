@@ -102,6 +102,7 @@ SENSEVOICE_DEVICE=cpu || cuda
 - `capabilities/omniparser`：本地 OmniParser 部署脚本、适配服务与说明文档
 - `capabilities/ppocr`：本地 PP-OCRv5 mobile 部署脚本、适配服务与说明文档
 - `capabilities/sensevoice`：本地 SenseVoice Small 部署脚本、适配服务与说明文档
+- `capabilities/vocaela`：本地 Vocaela-2-500M-1024R2 视觉语言 GUI agent 部署脚本、适配服务与说明文档
 
 能力目录约束：
 
@@ -154,6 +155,29 @@ npm run capability:ppocr:start
 - 当前只使用 `PP-OCRv5 mobile det + rec`
 - 开发者模式新增了 `PP-OCRv5 Mobile` 测试面板，可自动截取主屏并保存 OCR 标注图
 - Electron 启动时会自动托管本地 PP-OCR 服务，并在首次启动后跑一次 `1x1 PNG` warmup，尽量把模型加载前移
+
+## 本地部署 Vocaela-2-500M-1024R2
+
+首次部署：
+
+```powershell
+npm run capability:vocaela:setup
+```
+
+启动本地服务：
+
+```powershell
+npm run capability:vocaela:start
+```
+
+说明：
+
+- 默认使用项目内虚拟环境 `exp/bridge/capabilities/vocaela/.local/.venv`
+- 默认服务地址为 `http://127.0.0.1:8030`
+- 默认模型目录为 `exp/bridge/capabilities/vocaela/.local/models/Vocaela-2-500M-1024R2`
+- 默认缓存目录为 `exp/bridge/capabilities/vocaela/.local/cache`
+- 与 `ppocr` / `omniparser` 只做 OCR / 图标检测不同，这里做的是"截图 + 指令 -> 结构化 GUI 动作"（带归一化坐标），服务会把 `[0,1)` 坐标同步回算成像素坐标方便 `click_at({x,y})` 消费
+- 许可为 `CC BY-NC-SA 4.0`，仅限非商业用途
 
 ## 语音点选路由
 

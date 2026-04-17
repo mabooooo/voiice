@@ -1,0 +1,15 @@
+# Vocaela-2-500M-1024R2 基于 SmolVLM2-500M + Siglip-256，最低要求 transformers 4.49。
+# 这里锁到 4.51+，确保 AutoModelForImageTextToText 和 image-text-to-text chat_template 都走通。
+transformers>=4.51.0,<5
+accelerate>=0.28.0
+safetensors>=0.4.3
+sentencepiece>=0.2.0
+# SmolVLM2 processor 在构造提示里会调用 num2words 把数字转成英文。
+num2words>=0.5.13
+Pillow>=10.0.0
+numpy<2
+protobuf>=4.25
+fastapi==0.116.1
+uvicorn==0.35.0
+pydantic>=2.7
+huggingface_hub[cli]>=0.26

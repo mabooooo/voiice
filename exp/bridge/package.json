@@ -15,6 +15,8 @@
     "capability:ppocr:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/ppocr/start.ps1",
     "capability:sensevoice:setup": "powershell -ExecutionPolicy Bypass -File ./capabilities/sensevoice/setup.ps1",
     "capability:sensevoice:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/sensevoice/start.ps1",
+    "capability:vocaela:setup": "powershell -ExecutionPolicy Bypass -File ./capabilities/vocaela/setup.ps1",
+    "capability:vocaela:start": "powershell -ExecutionPolicy Bypass -File ./capabilities/vocaela/start.ps1",
     "smoke:matcher": "node ./scripts/smoke-matcher.mjs",
     "smoke:screenshot": "electron ./scripts/smoke-screenshot.mjs"
   },

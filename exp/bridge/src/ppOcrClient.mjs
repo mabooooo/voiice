@@ -41,8 +41,12 @@ export async function probePPOcr(options = {}) {
 }
 
 // 把截图直接编码为 base64 发送给本地 OCR 服务，减少路径耦合。
+// 语音点选链路会先在内存中缩放截图，通过 options.imageBuffer 直接传入，
+// 避免把缩放产物落盘（imagePath 仅用于回显与日志）。
 export async function testPPOcrWithImage(imagePath, options = {}) {
-  const buffer = await fsPromises.readFile(imagePath)
+  const buffer = options.imageBuffer instanceof Buffer
+    ? options.imageBuffer
+    : await fsPromises.readFile(imagePath)
   const startedAt = Date.now()
   const { baseURL, payload } = await requestPPOcr('/parse/', {
     ...options,

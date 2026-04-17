@@ -57,8 +57,12 @@ export async function probeOmniParser(options = {}) {
 }
 
 // 把本地图像转换为 base64 后直接送到本地能力服务，减少服务端文件路径耦合。
+// 语音点选链路为了加速 OCR 会先在内存中缩放截图，通过 options.imageBuffer 直接传入，
+// 避免把缩放产物落盘（imagePath 仅用于回显与日志）。
 export async function testOmniParserWithImage(imagePath, options = {}) {
-  const buffer = await fsPromises.readFile(imagePath)
+  const buffer = options.imageBuffer instanceof Buffer
+    ? options.imageBuffer
+    : await fsPromises.readFile(imagePath)
   const startedAt = Date.now()
   const { baseURL, payload } = await requestOmniParser('/parse/', {
     ...options,

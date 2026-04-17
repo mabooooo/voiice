@@ -1,4 +1,14 @@
 // 屏幕 / 窗口 / 截图 像素空间统一换算。
+
+// 链路
+// - 截图输出：
+//     captureDesktopScreenshots / captureWindowImage → { imagePath, width, height }（物理像素）
+// - OCR：
+//     runVoiceOcrWithImage(imagePath, backend, options) → 返回 bbox（当前在"图像像素"空间）
+// - 坐标换算：
+//     screenCoordinates.mjs 的 mapWindowImageRect / mapFullScreenImageRect 
+//     以 imageSize + windowBounds(逻辑) 或 display.bounds(逻辑) 算出 scaleX/Y，驱动 windowLocalPhysical、globalPhysicalClick 等字段。
+
 //
 // 约定：
 //   - OCR bbox、image width/height 都是“物理像素”（窗口截图 PS 里已 SetProcessDpiAware）。

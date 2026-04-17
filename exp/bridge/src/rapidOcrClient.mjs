@@ -1,5 +1,7 @@
 import fsPromises from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 
 const RAPIDOCR_SCRIPT_PATH = path.join(process.cwd(), '.runtime', 'rapidocr_test.py')
@@ -46,27 +48,44 @@ function buildTempJsonPath(imagePath) {
 }
 
 // RapidOCR 直接复用本地测试脚本，保持和你手工验证时一致的 det+rec 参数。
+// 语音点选链路通过 options.imageBuffer 传入已缩放的截图，这里写到 OS 临时目录再跑 Python，
+// 不污染 runtime 截图目录，且结束后立刻清理；imagePath 仅用于回显。
 export async function testRapidOcrWithImage(imagePath, options = {}) {
-  if (!imagePath) {
+  const hasBuffer = options.imageBuffer instanceof Buffer
+  if (!imagePath && !hasBuffer) {
     throw new Error('缺少截图路径，无法执行 RapidOCR。')
   }
   await fsPromises.access(RAPIDOCR_SCRIPT_PATH)
   await fsPromises.access(PPOCR_PYTHON_PATH)
 
-  const outputJsonPath = buildTempJsonPath(imagePath)
+  let inputPath = imagePath
+  let cleanupInput = false
+  if (hasBuffer) {
+    inputPath = path.join(os.tmpdir(), `voiice-rapidocr-${randomUUID()}.png`)
+    await fsPromises.writeFile(inputPath, options.imageBuffer)
+    cleanupInput = true
+  }
+
+  const outputJsonPath = buildTempJsonPath(inputPath)
   const startedAt = Date.now()
-  await runPython(
-    PPOCR_PYTHON_PATH,
-    [
-      RAPIDOCR_SCRIPT_PATH,
-      imagePath,
-      '',
-      outputJsonPath,
-      options.version || 'v5',
-      String(options.threads || 8),
-    ],
-    options.timeoutMs || 120000,
-  )
+  try {
+    await runPython(
+      PPOCR_PYTHON_PATH,
+      [
+        RAPIDOCR_SCRIPT_PATH,
+        inputPath,
+        '',
+        outputJsonPath,
+        options.version || 'v5',
+        String(options.threads || 8),
+      ],
+      options.timeoutMs || 120000,
+    )
+  } finally {
+    if (cleanupInput) {
+      await fsPromises.unlink(inputPath).catch(() => {})
+    }
+  }
 
   const payload = JSON.parse(await fsPromises.readFile(outputJsonPath, 'utf8'))
   await fsPromises.unlink(outputJsonPath).catch(() => {})

@@ -18,6 +18,10 @@
 
 ## TODO
 
+- 语音 OCR 缩放阈值动态化：
+  当前 `runVoiceOcrWithImage` 固定对截图长高各缩放到 20%（`VOICE_OCR_DOWNSCALE = 0.8`）再送 OCR，bbox 回传时按同比例逆缩放，整条链路其它模块无感。
+  固定比例在“字号偏小 / 高 DPI 应用”场景容易把小字挤到检测阈值以下，后续需要按前台应用的字体大小、DPI 缩放、控件密度等信号动态调整缩放比例（或按短边目标像素反推），并落一份按应用归档的经验值。
+  调试时可通过环境变量 `VOICE_OCR_DEBUG_SAVE_DOWNSCALED=1` 把喂进 OCR 的缩放图落盘到原截图旁边（`*-ocr-scaled.png`），用来肉眼判断当前缩放比例是否丢字。
 - Overlay 迁移到 sidecar overlay：
   当前窗口高亮、候选框和连续听写指示层仍由 Electron 顶层透明窗承载，能工作，但仍绑定 Chromium 渲染与 BrowserWindow 生命周期。
 - 这项技术债起于 `v0.0.23`：

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.26 语音 OCR 前置缩放 + 缩放调试图
+
+### Added
+
+- 新增主进程语音 OCR 预处理常量 `VOICE_OCR_DOWNSCALE = 0.8`，统一在 OCR 前对截图做一次等比缩放，并记录精确 `scaleX / scaleY` 供后续坐标回算。
+- 新增环境变量 `VOICE_OCR_DEBUG_SAVE_DOWNSCALED`；开启后会把实际送进 OCR 的缩放图落盘到原截图旁边，文件名后缀为 `-ocr-scaled.png`，便于排查“小字是否在缩放后丢失”。
+- `runVoiceOcrWithImage()` 新增 `prepareDownscaledOcrImage()`、`maybeSaveDebugDownscaledImage()` 与 `unscaleOcrLines()` 这一组前后处理逻辑，统一负责“缩放送检 -> 调试落盘 -> bbox / polygon 逆缩放”。
+
+### Changed
+
+- 语音点选链路里的 `PP-OCR / OmniParser / RapidOCR` 现在统一消费内存里的缩放 PNG，不再默认直接读取原始截图文件；各 OCR client 新增 `options.imageBuffer` 通道以复用同一份缩放产物。
+- `runVoiceOcrWithImage()` 现在会在 OCR 完成日志中额外打印缩放信息，包括原图尺寸、缩放后尺寸以及调试图路径，便于直接确认当前链路是否真的走了缩放图。
+- `RapidOCR` 在接收内存缩放图时，改为先写入 OS 临时目录再调用本地 Python 脚本，执行后立即清理，不再污染 `exp/bridge/.runtime` 截图目录。
+- README 的 TODO 新增“语音 OCR 缩放阈值动态化”条目，明确当前固定 `0.8` 缩放只是过渡方案，后续需要按字体大小、DPI 与控件密度动态调整。
+- 现在临时输入文件写入系统临时目录并在调用结束后回收。
+
 ## 0.0.25 OCR GPU Profile + 设置持久化恢复
 
 ### Added

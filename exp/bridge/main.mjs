@@ -182,6 +182,11 @@ const VOICE_OCR_PROFILE_TABLE = {
 }
 const VOICE_OCR_PROFILE_SET = new Set(Object.keys(VOICE_OCR_PROFILE_TABLE))
 const SPATIAL_MEMORY_SEARCH_PADDING = 80
+// 语音 OCR 前对截图做等比缩放以加速后端推理；返回 bbox 会按相同比例逆缩放回原图像素。
+// 暂时固定 0.8（长高各保留 80%），后续按应用字体大小动态调整，详见 README TODO。
+const VOICE_OCR_DOWNSCALE = 0.8
+// 仅在需要排查缩放是否把小字挤没时打开：打开后会把传给 OCR 的缩放图落盘在原截图旁边。
+const VOICE_OCR_DEBUG_SAVE_DOWNSCALED = /^(1|true|yes|on)$/i.test(String(process.env.VOICE_OCR_DEBUG_SAVE_DOWNSCALED || ''))
 const DEFAULT_APP_SETTINGS = {
   activeMenu: 'developer',
   microphoneId: '',
@@ -312,28 +317,105 @@ function buildScreenRectFromCandidate(target) {
 
 // 空间记忆 / 高亮 / 点击之间的坐标换算统一在 src/screenCoordinates.mjs，这里只保留业务语义的薄封装。
 
+// 语音链路前置：内存里缩放截图，拿到 PNG buffer + 精确缩放系数。
+// 关键约定：调用方拿到的是“OCR 喂进去的图”的尺寸；unscaleOcrLines 里反向还原成原图坐标。
+function prepareDownscaledOcrImage(imagePath, sourceSize) {
+  const image = nativeImage.createFromPath(imagePath)
+  if (image.isEmpty()) {
+    throw new Error(`无法读取截图文件: ${imagePath}`)
+  }
+  const originalSize = image.getSize()
+  const originalWidth = sourceSize?.width || originalSize.width
+  const originalHeight = sourceSize?.height || originalSize.height
+  const targetWidth = Math.max(1, Math.round(originalWidth * VOICE_OCR_DOWNSCALE))
+  const targetHeight = Math.max(1, Math.round(originalHeight * VOICE_OCR_DOWNSCALE))
+  const resized = image.resize({ width: targetWidth, height: targetHeight, quality: 'best' })
+  const actual = resized.getSize()
+  // PNG 避免二次 JPEG 伪影，对小字更友好。
+  const buffer = resized.toPNG()
+  return {
+    buffer,
+    originalWidth,
+    originalHeight,
+    width: actual.width,
+    height: actual.height,
+    // 注意用“实测宽高”反推系数，避免 resize 取整带来的 1~2px 偏差累积到点击落点。
+    scaleX: actual.width / Math.max(1, originalWidth),
+    scaleY: actual.height / Math.max(1, originalHeight),
+  }
+}
+
+// 调试开关打开时把喂进 OCR 的缩放图落盘在原截图旁边，便于肉眼复核字号是否还能被识别。
+async function maybeSaveDebugDownscaledImage(imagePath, buffer) {
+  if (!VOICE_OCR_DEBUG_SAVE_DOWNSCALED) return null
+  const parsed = path.parse(imagePath)
+  const debugPath = path.join(parsed.dir, `${parsed.name}-ocr-scaled.png`)
+  try {
+    await fsPromises.writeFile(debugPath, buffer)
+    return debugPath
+  } catch (error) {
+    console.warn(`[voice] save downscaled debug image failed: ${error.message}`)
+    return null
+  }
+}
+
+// OCR 返回的 bbox / polygon 都在“缩放后小图”像素空间；这里乘回去让下游永远只看到原图坐标。
+function unscaleOcrLines(lines, scaleX, scaleY) {
+  if (!Array.isArray(lines) || lines.length === 0) return lines || []
+  const inverseX = 1 / Math.max(scaleX, Number.EPSILON)
+  const inverseY = 1 / Math.max(scaleY, Number.EPSILON)
+  return lines.map((line) => {
+    if (!line) return line
+    const next = { ...line }
+    if (Array.isArray(line.bbox) && line.bbox.length === 4) {
+      next.bbox = [
+        Math.round(line.bbox[0] * inverseX),
+        Math.round(line.bbox[1] * inverseY),
+        Math.round(line.bbox[2] * inverseX),
+        Math.round(line.bbox[3] * inverseY),
+      ]
+    }
+    if (Array.isArray(line.polygon)) {
+      next.polygon = line.polygon.map(point => Array.isArray(point)
+        ? [Math.round(point[0] * inverseX), Math.round(point[1] * inverseY)]
+        : point,
+      )
+    }
+    return next
+  })
+}
+
 async function runVoiceOcrWithImage(imagePath, backend, options = {}) {
   const normalizedBackend = normalizeVoiceOcrBackend(backend)
   const profile = normalizeVoiceOcrProfile(backend)
   const ocrStartAt = Date.now()
 
+  // 所有后端统一先做内存缩放；后端 client 接 options.imageBuffer 就不再读盘。
+  const scaled = prepareDownscaledOcrImage(imagePath)
+  const debugPath = await maybeSaveDebugDownscaledImage(imagePath, scaled.buffer)
+  const backendOptions = { ...options, imageBuffer: scaled.buffer }
+  const scaleLog = `scale=${VOICE_OCR_DOWNSCALE} ${scaled.originalWidth}x${scaled.originalHeight}->${scaled.width}x${scaled.height}${debugPath ? ` debug=${debugPath}` : ''}`
+
   if (normalizedBackend === 'omniparser') {
     await ensureManagedOmniParserServiceReady({ profile })
-    const result = await testOmniParserWithImage(imagePath, options)
-    console.log(`[${new Date().toISOString()}] [voice] omniparser completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0} elements=${result.elementCount || 0}`)
-    return result
+    const result = await testOmniParserWithImage(imagePath, backendOptions)
+    const ocrLines = unscaleOcrLines(result.ocrLines, scaled.scaleX, scaled.scaleY)
+    console.log(`[${new Date().toISOString()}] [voice] omniparser completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0} elements=${result.elementCount || 0} ${scaleLog}`)
+    return { ...result, ocrLines }
   }
 
   if (normalizedBackend === 'rapidocr') {
-    const result = await testRapidOcrWithImage(imagePath, options)
-    console.log(`[${new Date().toISOString()}] [voice] rapidocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0}`)
-    return result
+    const result = await testRapidOcrWithImage(imagePath, backendOptions)
+    const ocrLines = unscaleOcrLines(result.ocrLines, scaled.scaleX, scaled.scaleY)
+    console.log(`[${new Date().toISOString()}] [voice] rapidocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0} ${scaleLog}`)
+    return { ...result, ocrLines }
   }
 
   await ensureManagedPPOcrServiceReady({ profile })
-  const result = await testPPOcrWithImage(imagePath, options)
-  console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0}`)
-  return result
+  const result = await testPPOcrWithImage(imagePath, backendOptions)
+  const ocrLines = unscaleOcrLines(result.ocrLines, scaled.scaleX, scaled.scaleY)
+  console.log(`[${new Date().toISOString()}] [voice] ppocr completed in ${Date.now() - ocrStartAt}ms: lines=${result.lineCount || 0} ${scaleLog}`)
+  return { ...result, ocrLines }
 }
 
 // 直接用 Electron 原生图片裁剪局部区域，避免额外引入图像处理依赖。
